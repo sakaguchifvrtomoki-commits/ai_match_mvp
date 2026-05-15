@@ -538,6 +538,7 @@ def run_matching():
     2. マッチング（候補者選出）
     3. マッチ後支援方針の生成
     """
+    st.session_state.top_match_candidates = None
     candidates = load_candidates()
     analysis = st.session_state.analysis_result
     
@@ -645,10 +646,20 @@ def main():
         candidate = match["matched_candidate"]
         st.markdown(f"**名前:** {candidate.get('name','-')} ({candidate.get('age','-')}歳)")
         st.markdown(f"**説明:** {candidate.get('description','-')}")
-        st.markdown(f"**相性スコア:** {match.get('match_score',0)} / 100")
+        st.markdown(f"**相性タイプ:** {match.get('match_label','-')}")
         st.success(f"**なぜ相性が良いのか:** {match.get('match_reason','-')}")
         st.warning(f"**注意点:** {match.get('possible_concern','-')}")
         st.info(f"**おすすめの最初のメッセージ:** {match.get('recommended_first_message','-')}")
+
+        if st.session_state.top_match_candidates:
+            other_candidates = [item for item in st.session_state.top_match_candidates[1:3] if item.get('candidate')]
+            if other_candidates:
+                st.markdown("---")
+                st.markdown("**他にも相性が近かった候補者:**")
+                for idx, item in enumerate(other_candidates, start=2):
+                    other_name = item['candidate'].get('name', '未設定')
+                    st.write(f"{idx}位: {other_name}")
+
         st.markdown("---")
         st.caption("このマッチングはAIによる分析に基づいています。実際の相性は対話を通じて確かめてください。")
 
