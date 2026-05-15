@@ -578,23 +578,6 @@ def main():
     ensure_session_state()
     render_chat()
 
-    with st.expander("デバッグ情報（開発用）", expanded=False):
-        st.write("messages:", st.session_state.messages)
-        st.write("last_analysis_response:", st.session_state.last_analysis_response)
-        st.write("last_analysis_error:", st.session_state.last_analysis_error)
-        st.write("---")
-        st.write("【マッチング詳細】")
-        st.write("selected_candidate_debug:", st.session_state.selected_candidate_debug)
-        st.write("match_details_raw_response:", st.session_state.match_details_raw_response)
-        st.write("match_details_error:", st.session_state.match_details_error)
-        st.write("---")
-        st.write("last_match_response:", st.session_state.last_match_response)
-        st.write("last_match_error:", st.session_state.last_match_error)
-        st.write("last_after_match_support_response:", st.session_state.last_after_match_support_response)
-        st.write("last_after_match_support_error:", st.session_state.last_after_match_support_error)
-        st.write("last_reply_finish_reason:", st.session_state.last_reply_finish_reason)
-        st.write("top_match_candidates:", st.session_state.top_match_candidates)
-
     user_message = st.chat_input("メッセージを入力してください")
     if user_message:
         st.session_state.messages.append({"role": "user", "content": user_message})
@@ -647,7 +630,7 @@ def main():
         st.markdown(f"**名前:** {candidate.get('name','-')} ({candidate.get('age','-')}歳)")
         st.markdown(f"**説明:** {candidate.get('description','-')}")
         st.markdown(f"**相性タイプ:** {match.get('match_label','-')}")
-        st.success(f"**なぜ相性が良いのか:** {match.get('match_reason','-')}")
+        st.success(f"**この候補者との相性ポイント:** {match.get('match_reason','-')}")
         st.warning(f"**注意点:** {match.get('possible_concern','-')}")
         st.info(f"**おすすめの最初のメッセージ:** {match.get('recommended_first_message','-')}")
 
@@ -682,6 +665,23 @@ def main():
             else:
                 support_type_str = str(support_types)
             st.write(f"**支援タイプ:** {support_type_str}")
+
+    with st.expander("デバッグ情報（開発用）", expanded=False):
+        st.write("messages:", st.session_state.messages)
+        st.write("last_analysis_response:", st.session_state.last_analysis_response)
+        st.write("last_analysis_error:", st.session_state.last_analysis_error)
+        st.write("---")
+        st.write("【マッチング詳細】")
+        st.write("selected_candidate_debug:", st.session_state.selected_candidate_debug)
+        st.write("match_details_raw_response:", st.session_state.match_details_raw_response)
+        st.write("match_details_error:", st.session_state.match_details_error)
+        st.write("---")
+        st.write("last_match_response:", st.session_state.last_match_response)
+        st.write("last_match_error:", st.session_state.last_match_error)
+        st.write("last_after_match_support_response:", st.session_state.last_after_match_support_response)
+        st.write("last_after_match_support_error:", st.session_state.last_after_match_support_error)
+        st.write("last_reply_finish_reason:", st.session_state.last_reply_finish_reason)
+        st.write("top_match_candidates:", st.session_state.top_match_candidates)
 
 
 if __name__ == "__main__":
