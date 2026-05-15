@@ -39,6 +39,8 @@ def ensure_session_state():
         st.session_state.match_result = None
     if "after_match_support" not in st.session_state:
         st.session_state.after_match_support = None
+    if "top_match_candidates" not in st.session_state:
+        st.session_state.top_match_candidates = None
     if "last_analysis_response" not in st.session_state:
         st.session_state.last_analysis_response = None
     if "last_analysis_error" not in st.session_state:
@@ -165,14 +167,14 @@ def analyze_user(chat_history):
 
 def build_profile_text(candidate):
     parts = [
-        f"名前: {candidate['name']}",
-        f"年齢: {candidate['age']}",
-        f"性格: {candidate['personality']}",
-        f"価値観: {candidate['values']}",
-        f"趣味: {candidate['hobbies']}",
-        f"会話スタイル: {candidate['communication_style']}",
-        f"関係性スタイル: {candidate['relationship_style']}",
-        f"説明: {candidate['description']}",
+        f"名前: {candidate.get('name', '未設定')}",
+        f"年齢: {candidate.get('age', '未設定')}",
+        f"性格: {candidate.get('personality', '')}",
+        f"価値観: {candidate.get('values', '')}",
+        f"趣味: {candidate.get('hobbies', '')}",
+        f"会話スタイル: {candidate.get('communication_style', '')}",
+        f"関係性スタイル: {candidate.get('relationship_style', '')}",
+        f"説明: {candidate.get('description', '')}",
     ]
     return "。".join(parts)
 
@@ -210,37 +212,49 @@ def cosine_similarity(a, b):
     return dot / (norm_a * norm_b)
 
 
-def choose_best_candidate(analysis, candidates):
+def choose_top_candidates(analysis, candidates, top_n=3):
     client = get_openai_client()
     if client is None or analysis is None:
-        return None
+        return []
 
     analysis_text = build_analysis_text(analysis)
     analysis_emb = get_embedding(client, analysis_text)
-    best = None
-    best_score = -1.0
+    candidates_with_scores = []
 
     for candidate in candidates:
         candidate_text = build_profile_text(candidate)
         candidate_emb = get_embedding(client, candidate_text)
         score = cosine_similarity(analysis_emb, candidate_emb)
-        if score > best_score:
-            best_score = score
-            best = candidate
+        candidates_with_scores.append({
+            "candidate": candidate,
+            "similarity": score
+        })
 
-    if best is None:
-        return None
+    # similarity の高い順にソート
+    candidates_with_scores.sort(key=lambda x: x["similarity"], reverse=True)
+    return candidates_with_scores[:top_n]
 
-    return {
-        "candidate": best,
-        "similarity": best_score,
-    }
+
+def choose_best_candidate(analysis, candidates):
+    top_matches = choose_top_candidates(analysis, candidates, top_n=1)
+    return top_matches[0] if top_matches else None
 
 
 def build_reason_prompt(analysis, candidate):
     """（旧実装は廃止。新しい build_match_details_prompt() を使用）"""
     return ""
 
+
+
+def score_to_label(score):
+    if score >= 0.85:
+        return "かなり相性が高い"
+    elif score >= 0.78:
+        return "相性が良い"
+    elif score >= 0.70:
+        return "可能性あり"
+    else:
+        return "やや慎重に見る相性"
 
 
 def build_match_result(analysis, candidate, similarity):
@@ -257,10 +271,43 @@ def build_match_result(analysis, candidate, similarity):
     return {
         "matched_candidate": candidate,
         "match_score": min(max(int(similarity * 100), 0), 100),
+        "match_label": score_to_label(similarity),
         "match_reason": details.get("reason", ""),
         "possible_concern": details.get("caution", ""),
         "recommended_first_message": details.get("first_message", ""),
     }
+
+
+def validate_match_details(details):
+    if not details:
+        return False, "details が空です。"
+
+    required_keys = ["reason", "caution", "first_message"]
+    for key in required_keys:
+        if key not in details:
+            return False, f"{key} がありません。"
+
+    forbidden_phrases = [
+        "この候補者はあなたの価値観や会話スタイルとよく合っている可能性があります",
+        "違いがある場合は、お互いのペースを確認することが大切かもしれません",
+        "最近のことや興味を持っていることについて気軽に話しかけてみましょう"
+    ]
+
+    text = str(details)
+    for phrase in forbidden_phrases:
+        if phrase in text:
+            return False, f"禁止文が検出されました: {phrase}"
+
+    if len(details.get("reason", "")) < 250:
+        return False, "reason が短すぎます。"
+
+    if len(details.get("caution", "")) < 150:
+        return False, "caution が短すぎます。"
+
+    if len(details.get("first_message", "")) < 20:
+        return False, "first_message が短すぎます。"
+
+    return True, None
 
 
 def generate_match_details(analysis, candidate, conversation_summary=""):
@@ -273,13 +320,6 @@ def generate_match_details(analysis, candidate, conversation_summary=""):
         return None
     
     prompt = build_match_details_prompt(analysis, candidate, conversation_summary)
-    
-    # 禁止文
-    forbidden_phrases = [
-        "この候補者はあなたの価値観や会話スタイルとよく合っている可能性があります",
-        "違いがある場合は、お互いのペースを確認することが大切かもしれません",
-        "最近のことや興味を持っていることについて気軽に話しかけてみましょう"
-    ]
     
     max_retries = 3
     for attempt in range(max_retries):
@@ -302,15 +342,10 @@ def generate_match_details(analysis, candidate, conversation_summary=""):
                 st.session_state.match_details_error = f"JSON解析に失敗しました（試行 {attempt+1}/{max_retries}）"
                 continue
             
-            # 禁止文チェック
-            has_forbidden = False
-            for phrase in forbidden_phrases:
-                if phrase in str(details.get('reason', '')) or phrase in str(details.get('caution', '')) or phrase in str(details.get('first_message', '')):
-                    has_forbidden = True
-                    st.session_state.match_details_error = f"禁止文が検出されました: {phrase}"
-                    break
+            is_valid, error_message = validate_match_details(details)
             
-            if has_forbidden:
+            if not is_valid:
+                st.session_state.match_details_error = f"{error_message}（試行 {attempt+1}/{max_retries}）"
                 continue
             
             st.session_state.match_details_error = None
@@ -342,14 +377,14 @@ def build_match_details_prompt(analysis, candidate, conversation_summary=""):
         f"理想の相手像: {analysis.get('ideal_partner_type','')}\n"
         f"要約: {analysis.get('summary','')}\n\n"
         "【候補者プロフィール】\n"
-        f"名前: {candidate['name']}\n"
-        f"年齢: {candidate['age']}\n"
-        f"性格: {candidate['personality']}\n"
-        f"価値観: {candidate['values']}\n"
-        f"趣味: {candidate['hobbies']}\n"
-        f"会話スタイル: {candidate['communication_style']}\n"
-        f"関係性スタイル: {candidate['relationship_style']}\n"
-        f"説明: {candidate['description']}\n\n"
+        f"名前: {candidate.get('name', '未設定')}\n"
+        f"年齢: {candidate.get('age', '未設定')}\n"
+        f"性格: {candidate.get('personality', '')}\n"
+        f"価値観: {candidate.get('values', '')}\n"
+        f"趣味: {candidate.get('hobbies', '')}\n"
+        f"会話スタイル: {candidate.get('communication_style', '')}\n"
+        f"関係性スタイル: {candidate.get('relationship_style', '')}\n"
+        f"説明: {candidate.get('description', '')}\n\n"
         "【出力形式】\n"
         "JSON のみで、必ず以下のキーを含めてください。\n"
         "{\n"
@@ -385,13 +420,16 @@ def generate_match(analysis, candidates):
         return None
     
     # ステップ1: 埋め込みベースで候補者を絞る
-    match = choose_best_candidate(analysis, candidates)
-    if match is None:
+    top_matches = choose_top_candidates(analysis, candidates, top_n=3)
+    if not top_matches:
         st.session_state.last_match_error = "候補者を選出できませんでした。"
         return None
     
+    st.session_state.top_match_candidates = top_matches
+    best_match = top_matches[0]
+    
     # ステップ2: AIに詳細なマッチング理由を生成させる
-    match_result = build_match_result(analysis, match["candidate"], match["similarity"])
+    match_result = build_match_result(analysis, best_match["candidate"], best_match["similarity"])
     
     return match_result
 
@@ -554,6 +592,7 @@ def main():
         st.write("last_after_match_support_response:", st.session_state.last_after_match_support_response)
         st.write("last_after_match_support_error:", st.session_state.last_after_match_support_error)
         st.write("last_reply_finish_reason:", st.session_state.last_reply_finish_reason)
+        st.write("top_match_candidates:", st.session_state.top_match_candidates)
 
     user_message = st.chat_input("メッセージを入力してください")
     if user_message:
@@ -565,20 +604,26 @@ def main():
     col1, col2 = st.columns([1, 1])
     with col1:
         if st.button("分析してマッチングする"):
-            if len(st.session_state.messages) <= 1:
-                st.warning("まずはAIとの会話を少し進めてください。")
+            user_messages = [
+                m for m in st.session_state.messages
+                if m.get("role") == "user" and m.get("content", "").strip()
+            ]
+            if len(user_messages) < 3:
+                st.warning("もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。")
             else:
                 with st.spinner("分析中です... 少々お待ちください。"):
                     st.session_state.analysis_result = analyze_user(st.session_state.messages)
-                    st.session_state.match_result = run_matching()
                     if st.session_state.analysis_result is None:
                         st.error("分析結果を取得できませんでした。もう一度お試しください。")
+                    else:
+                        st.session_state.match_result = run_matching()
     with col2:
         if st.button("最初からやり直す"):
             st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
             st.session_state.analysis_result = None
             st.session_state.match_result = None
             st.session_state.after_match_support = None
+            st.session_state.top_match_candidates = None
             st.rerun()
 
     if st.session_state.analysis_result:
