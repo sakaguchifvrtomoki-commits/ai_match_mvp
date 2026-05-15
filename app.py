@@ -136,6 +136,7 @@ def analyze_user(chat_history):
         " 以下の会話履歴から、JSON形式で分析結果を出力してください。"
         " JSONのキーは personality、values、hidden_needs、communication_style、ideal_partner_type、summary です。"
         " 各値は日本語で、断定調を避けて「〜かもしれません」「〜の可能性があります」を使ってください。"
+        " 各項目について、会話履歴から具体的な例や引用を1-2つ含めて説明を充実させてください。"
         " 出力は必ずJSONのみでお願いします。\n\n"
         f"会話履歴:\n{conversation}\n"
     )
@@ -147,7 +148,7 @@ def analyze_user(chat_history):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.8,
-            max_completion_tokens=1000,
+            max_completion_tokens=1200,  # 少し増やす
         )
         st.session_state.last_analysis_response = response.choices[0].message.content.strip()
         analysis = extract_json(st.session_state.last_analysis_response)
@@ -290,7 +291,7 @@ def generate_match_details(analysis, candidate, conversation_summary=""):
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.9,
-                max_completion_tokens=1000,
+                max_completion_tokens=1200,  # 増やす
             )
             
             raw_response = response.choices[0].message.content.strip()
@@ -328,11 +329,11 @@ def build_match_details_prompt(analysis, candidate, conversation_summary=""):
         "あなたはAIマッチングアシスタントです。"
         " 以下の情報をもとに、具体的で差別化されたマッチング詳細情報をJSON形式で出力してください。\n\n"
         "【重要な制約】\n"
-        "1. reason フィールドには、ユーザー分析と候補者プロフィールの具体語をそれぞれ3つ以上含めること。\n"
+        "1. reason フィールドには、ユーザー分析と候補者プロフィールの具体語をそれぞれ3つ以上含め、なぜこのマッチングが良いのかを会話履歴やプロフィールから具体的な例を挙げて説明すること。\n"
         "2. reason フィールドに『この候補者はあなたの価値観や会話スタイルとよく合っている可能性があります』のような汎用文を絶対に含めないこと。\n"
-        "3. caution フィールドには、ユーザーと候補者のズレを具体的に説明し、『違いがある場合は、お互いのペースを確認することが大切かもしれません』のような抽象文を絶対に含めないこと。\n"
-        "4. first_message フィールドは、候補者の趣味・価値観に触れ、ユーザー自身の特徴も入れ、『最近のことや興味を持っていることについて気軽に話しかけてみましょう』のような汎用文にしないこと。\n"
-        "5. reason には最低300字、caution には最低200字の内容を含めること。\n\n"
+        "3. caution フィールドには、ユーザーと候補者のズレやすい具体的なポイントを挙げ、建設的なアドバイスを含めて説明し、『違いがある場合は、お互いのペースを確認することが大切かもしれません』のような抽象文を絶対に含めないこと。\n"
+        "4. first_message フィールドは、候補者の趣味・価値観に具体的に触れ、ユーザーの特徴も入れ、自然でパーソナライズされたメッセージにすること。『最近のことや興味を持っていることについて気軽に話しかけてみましょう』のような汎用文にしないこと。\n"
+        "5. reason には最低400字、caution には最低250字の内容を含めること。\n\n"
         "【ユーザー分析】\n"
         f"性格傾向: {analysis.get('personality','')}\n"
         f"価値観: {analysis.get('values','')}\n"
@@ -352,8 +353,8 @@ def build_match_details_prompt(analysis, candidate, conversation_summary=""):
         "【出力形式】\n"
         "JSON のみで、必ず以下のキーを含めてください。\n"
         "{\n"
-        '  "reason": "ユーザーの具体的な特性と候補者の具体的な特性を接続させ、なぜこの相手が合うのかを300字以上で説明。",\n'
-        '  "caution": "ユーザーと候補者のズレやすい具体的なポイント、温度差が出やすい場面を200字以上で説明。",\n'
+        '  "reason": "ユーザーの具体的な特性と候補者の具体的な特性を接続させ、なぜこの相手が合うのかを400字以上で説明。",\n'
+        '  "caution": "ユーザーと候補者のズレやすい具体的なポイント、温度差が出やすい場面を250字以上で説明。",\n'
         '  "first_message": "候補者のプロフィールに具体的に触れ、ユーザーの特徴も入れた自然なメッセージ。"\n'
         "}\n\n"
         "【禁止事項】\n"
@@ -584,24 +585,27 @@ def main():
         st.markdown("---")
         st.subheader("あなたの分析結果")
         analysis = st.session_state.analysis_result
-        st.write(f"**性格傾向:** {analysis.get('personality','-')}")
-        st.write(f"**大切にしている価値観:** {analysis.get('values','-')}")
-        st.write(f"**隠れた欲求:** {analysis.get('hidden_needs','-')}")
-        st.write(f"**会話スタイル:** {analysis.get('communication_style','-')}")
-        st.write(f"**相性が良い相手像:** {analysis.get('ideal_partner_type','-')}")
-        st.write(f"**一言要約:** {analysis.get('summary','-')}")
+        st.markdown(f"**性格傾向:** {analysis.get('personality','-')}")
+        st.markdown(f"**大切にしている価値観:** {analysis.get('values','-')}")
+        st.markdown(f"**隠れた欲求:** {analysis.get('hidden_needs','-')}")
+        st.markdown(f"**会話スタイル:** {analysis.get('communication_style','-')}")
+        st.markdown(f"**相性が良い相手像:** {analysis.get('ideal_partner_type','-')}")
+        st.markdown(f"**一言要約:** {analysis.get('summary','-')}")
+        st.info("💡 この分析はあなたの会話内容に基づいています。より深い対話でより正確な分析が可能です。")
 
     if st.session_state.match_result:
         st.markdown("---")
         st.subheader("マッチング結果")
         match = st.session_state.match_result
         candidate = match["matched_candidate"]
-        st.write(f"**名前:** {candidate.get('name','-')} ({candidate.get('age','-')}歳)")
-        st.write(f"**説明:** {candidate.get('description','-')}")
-        st.write(f"**相性スコア:** {match.get('match_score',0)} / 100")
-        st.write(f"**なぜ相性が良いのか:** {match.get('match_reason','-')}")
-        st.write(f"**注意点:** {match.get('possible_concern','-')}")
-        st.write(f"**おすすめの最初のメッセージ:** {match.get('recommended_first_message','-')}")
+        st.markdown(f"**名前:** {candidate.get('name','-')} ({candidate.get('age','-')}歳)")
+        st.markdown(f"**説明:** {candidate.get('description','-')}")
+        st.markdown(f"**相性スコア:** {match.get('match_score',0)} / 100")
+        st.success(f"**なぜ相性が良いのか:** {match.get('match_reason','-')}")
+        st.warning(f"**注意点:** {match.get('possible_concern','-')}")
+        st.info(f"**おすすめの最初のメッセージ:** {match.get('recommended_first_message','-')}")
+        st.markdown("---")
+        st.caption("このマッチングはAIによる分析に基づいています。実際の相性は対話を通じて確かめてください。")
 
     if st.session_state.after_match_support:
         st.markdown("---")
