@@ -125,6 +125,30 @@ def extract_json(text: str):
             return None
 
 
+def validate_analysis_result(analysis):
+    required_keys = [
+        "personality",
+        "values",
+        "hidden_needs",
+        "communication_style",
+        "ideal_partner_type",
+        "summary",
+    ]
+
+    if not isinstance(analysis, dict):
+        return False, "analysis が dict ではありません。"
+
+    for key in required_keys:
+        if key not in analysis:
+            return False, f"{key} がありません。"
+        if not isinstance(analysis[key], str):
+            return False, f"{key} が文字列ではありません。"
+        if not analysis[key].strip():
+            return False, f"{key} が空です。"
+
+    return True, None
+
+
 def analyze_user(chat_history):
     client = get_openai_client()
     if client is None:
@@ -135,29 +159,49 @@ def analyze_user(chat_history):
     )
     prompt = (
         "あなたはユーザーの性格、価値観、本音を分析するアシスタントです。"
-        " 以下の会話履歴から、JSON形式で分析結果を出力してください。"
-        " JSONのキーは personality、values、hidden_needs、communication_style、ideal_partner_type、summary です。"
-        " 各値は日本語で、断定調を避けて「〜かもしれません」「〜の可能性があります」を使ってください。"
-        " 各項目について、会話履歴から具体的な例や引用を1-2つ含めて説明を充実させてください。"
-        " 出力は必ずJSONのみでお願いします。\n\n"
+        " 以下の会話履歴から、JSON形式で分析結果を出力してください。\n\n"
+        "【出力形式】\n"
+        "以下の6つのキーを持つJSONオブジェクトのみを出力してください。\n"
+        "{\n"
+        '  "personality": "100〜180字程度で、性格傾向を要約",\n'
+        '  "values": "100〜180字程度で、大切にしている価値観を要約",\n'
+        '  "hidden_needs": "100〜180字程度で、隠れた欲求を要約",\n'
+        '  "communication_style": "100〜180字程度で、会話スタイルを要約",\n'
+        '  "ideal_partner_type": "100〜180字程度で、相性が良い相手像を要約",\n'
+        '  "summary": "80〜140字程度で、一言要約"\n'
+        "}\n\n"
+        "【制約】\n"
+        "- JSONのみを出力すること。Markdownコードブロック（```json）は使わないこと\n"
+        "- JSONの外に説明文を出さないこと\n"
+        "- 各値は必ず文字列にすること。配列にしないこと\n"
+        "- 各項目は100〜180字程度に収めること（summary は80〜140字）\n"
+        "- 断定調を避けて「〜かもしれません」「〜の可能性があります」を使うこと\n"
+        "- 会話履歴から具体的な引用を1つ含めること\n\n"
         f"会話履歴:\n{conversation}\n"
     )
     try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": "あなたは日本語で分析結果をJSONで出力するアシスタントです。"},
+                {"role": "system", "content": "あなたは日本語でユーザーの性格・価値観を分析し、必ず有効なJSONのみを返すアシスタントです。"},
                 {"role": "user", "content": prompt},
             ],
-            temperature=0.8,
-            max_completion_tokens=1200,  # 少し増やす
+            temperature=0.4,
+            max_completion_tokens=1200,
+            response_format={"type": "json_object"},
         )
         st.session_state.last_analysis_response = response.choices[0].message.content.strip()
         analysis = extract_json(st.session_state.last_analysis_response)
         if analysis is None:
             st.session_state.last_analysis_error = "JSON解析に失敗しました。"
-        else:
-            st.session_state.last_analysis_error = None
+            return None
+
+        is_valid, error_message = validate_analysis_result(analysis)
+        if not is_valid:
+            st.session_state.last_analysis_error = f"分析結果の形式が不正です: {error_message}"
+            return None
+
+        st.session_state.last_analysis_error = None
         return analysis
     except Exception as e:
         st.session_state.last_analysis_error = str(e)
@@ -331,7 +375,7 @@ def generate_match_details(analysis, candidate, conversation_summary=""):
                     {"role": "user", "content": prompt},
                 ],
                 temperature=0.9,
-                max_completion_tokens=1200,  # 増やす
+                max_completion_tokens=2000,
             )
             
             raw_response = response.choices[0].message.content.strip()
@@ -502,7 +546,7 @@ def generate_after_match_support(analysis, match_result):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.8,
-            max_completion_tokens=1200,
+            max_completion_tokens=2500,
         )
         st.session_state.last_after_match_support_response = response.choices[0].message.content.strip()
         support = extract_json(st.session_state.last_after_match_support_response)
