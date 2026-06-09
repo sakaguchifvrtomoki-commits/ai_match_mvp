@@ -1,6 +1,9 @@
+import datetime
 import json
 import math
 import os
+import traceback
+import uuid
 from pathlib import Path
 
 import streamlit as st
@@ -8,6 +11,8 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
+
+APP_VERSION = "0.0.3"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
@@ -18,6 +23,358 @@ def get_openai_client():
     if not OPENAI_API_KEY:
         return None
     return OpenAI(api_key=OPENAI_API_KEY)
+
+
+def ensure_log_dirs():
+    base = Path(__file__).parent / "logs" / APP_VERSION
+    for sub in ("sessions", "debug", "errors"):
+        (base / sub).mkdir(parents=True, exist_ok=True)
+
+
+def get_log_paths():
+    base = Path(__file__).parent / "logs" / APP_VERSION
+    return {
+        "sessions_dir": base / "sessions",
+        "debug_file": base / "debug" / "debug.jsonl",
+        "error_file": base / "errors" / "error.jsonl",
+    }
+
+
+def generate_session_id() -> str:
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"session_{ts}_{uuid.uuid4().hex[:6]}"
+
+
+def get_or_create_session_id() -> str:
+    if not st.session_state.get("session_id"):
+        st.session_state.session_id = generate_session_id()
+    return st.session_state.session_id
+
+
+def write_debug_log(event: str, data=None):
+    try:
+        paths = get_log_paths()
+        entry = {
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "session_id": get_or_create_session_id(),
+            "event": event,
+        }
+        if data is not None:
+            entry["data"] = data
+        with open(paths["debug_file"], "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        st.warning("デバッグログの書き込みに失敗しました（アプリの動作には影響しません）。")
+
+
+def write_error_log(event: str, error_message: str, data=None):
+    try:
+        paths = get_log_paths()
+        entry = {
+            "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+            "session_id": get_or_create_session_id(),
+            "event": event,
+            "error": error_message,
+        }
+        if data is not None:
+            entry["data"] = data
+        with open(paths["error_file"], "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        st.warning("エラーログの書き込みに失敗しました（アプリの動作には影響しません）。")
+
+
+def save_session_markdown_log(session_status: str = "completed", end_reason: str = None):
+    try:
+        session_id = get_or_create_session_id()
+        consent_value = str(st.session_state.get("log_consent", "")).lower()
+        consented_at = st.session_state.get("consented_at", "")
+        started_at = st.session_state.get("session_started_at", consented_at)
+        ended_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        session_info = [
+            "# AI分身マッチングMVP ログ",
+            "",
+            "## セッション情報",
+            f"- app_version: v{APP_VERSION}",
+            f"- session_id: {session_id}",
+            f"- started_at: {started_at}",
+            f"- ended_at: {ended_at}",
+            f"- log_consent: {consent_value}",
+            f"- consented_at: {consented_at}",
+            f"- session_status: {session_status}",
+        ]
+        if end_reason:
+            session_info.append(f"- end_reason: {end_reason}")
+        lines = session_info + ["", "## チャット履歴"]
+        for msg in st.session_state.get("messages", []):
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            lines.append(f"[{role}]: {content}")
+
+        analysis = st.session_state.get("analysis_result")
+        if analysis:
+            lines += [
+                "",
+                "## 分析結果",
+                f"性格傾向: {analysis.get('personality', '')}",
+                f"価値観: {analysis.get('values', '')}",
+                f"隠れた欲求: {analysis.get('hidden_needs', '')}",
+                f"会話スタイル: {analysis.get('communication_style', '')}",
+                f"理想の相手像: {analysis.get('ideal_partner_type', '')}",
+                f"一言要約: {analysis.get('summary', '')}",
+            ]
+
+        match = st.session_state.get("match_result")
+        if match:
+            candidate = match.get("matched_candidate", {})
+            lines += [
+                "",
+                "## マッチング結果",
+                f"マッチ相手: {candidate.get('name', '')} ({candidate.get('age', '')}歳)",
+                f"説明: {candidate.get('description', '')}",
+                f"相性タイプ: {match.get('match_label', '')}",
+                f"相性ポイント: {match.get('match_reason', '')}",
+                f"注意点: {match.get('possible_concern', '')}",
+                f"最初のメッセージ: {match.get('recommended_first_message', '')}",
+            ]
+
+        top_matches = st.session_state.get("top_match_candidates")
+        analysis_for_log = st.session_state.get("analysis_result") or {}
+        if top_matches:
+            other_candidates = [item for item in top_matches[1:3] if item.get("candidate")]
+            if other_candidates:
+                lines += ["", "## 他にも相性が近かった候補者"]
+                for idx, item in enumerate(other_candidates, start=2):
+                    c = item["candidate"]
+                    reason = generate_short_candidate_reason(analysis_for_log, c)
+                    lines.append(f"{idx}位: {c.get('name', '')} ({c.get('age', '')}歳) — {reason}")
+
+        support = st.session_state.get("after_match_support")
+        if support:
+            lines += [
+                "",
+                "## マッチ後支援",
+                f"今日送る一言: {support.get('first_message_today', '')}",
+                f"3日以内に聞く質問: {support.get('question_in_3days', '')}",
+                f"避けたほうがいい一言: {support.get('avoid_phrase', '')}",
+                f"返信が遅いときの対応: {support.get('slow_reply_action', '')}",
+            ]
+
+        log_path_str = st.session_state.get("session_log_path")
+        if log_path_str:
+            log_path = Path(log_path_str)
+        else:
+            paths = get_log_paths()
+            log_path = paths["sessions_dir"] / f"{session_id}.md"
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+    except Exception:
+        st.warning("セッションログの保存に失敗しました（アプリの動作には影響しません）。")
+
+
+def create_initial_session_log():
+    try:
+        write_debug_log("session_markdown_initial_save_started", {
+            "level": "INFO",
+            "message": "初期session Markdownログの保存を開始しました",
+        })
+        session_id = get_or_create_session_id()
+        parts = session_id.split("_")
+        if len(parts) == 4 and parts[0] == "session":
+            ts = f"{parts[1]}_{parts[2]}"
+            short_id = parts[3]
+        else:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            short_id = "unknown"
+        filename = f"session_{ts}_v{APP_VERSION}_{short_id}.md"
+
+        paths = get_log_paths()
+        log_path = paths["sessions_dir"] / filename
+
+        started_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.session_started_at = started_at
+        consented_at = st.session_state.get("consented_at", started_at)
+        consent_value = str(st.session_state.get("log_consent", "")).lower()
+        lines = [
+            "# AI分身マッチングMVP ログ",
+            "",
+            "## セッション情報",
+            f"- app_version: v{APP_VERSION}",
+            f"- session_id: {session_id}",
+            f"- started_at: {started_at}",
+            "- ended_at: 未完了",
+            f"- log_consent: {consent_value}",
+            f"- consented_at: {consented_at}",
+            "- session_status: started",
+            "",
+            "## チャット履歴",
+            "",
+            "まだチャット履歴はありません。",
+            "",
+            "## 分析結果",
+            "",
+            "まだ分析結果はありません。",
+            "",
+            "## マッチング結果",
+            "",
+            "まだマッチング結果はありません。",
+        ]
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        st.session_state.session_log_path = str(log_path)
+        write_debug_log("session_markdown_initial_save_finished", {
+            "level": "INFO",
+            "message": "初期session Markdownログの保存が完了しました",
+            "path": str(log_path),
+        })
+    except Exception as e:
+        write_debug_log("session_markdown_initial_save_failed", {
+            "level": "ERROR",
+            "message": "初期session Markdownログの保存に失敗しました",
+        })
+        write_error_log("session_markdown_initial_save_failed", str(e))
+        st.warning("初期セッションログの作成に失敗しました（アプリの動作には影響しません）。")
+
+
+def has_log_consent() -> bool:
+    return st.session_state.get("consent_status") == "accepted"
+
+
+def record_consent_event(accepted: bool):
+    if accepted:
+        write_debug_log("log_consent_accepted", {
+            "level": "INFO",
+            "message": "ユーザーがログ保存に同意しました",
+        })
+    else:
+        write_debug_log("log_consent_declined", {
+            "level": "INFO",
+            "message": "ユーザーがログ保存に同意しませんでした",
+        })
+
+
+def show_consent_screen():
+    st.subheader("ログ保存への同意確認")
+    st.write("このアプリでは、品質改善・動作確認のため、以下の情報を保存します。")
+    st.markdown(
+        "- チャット履歴\n"
+        "- 分析結果\n"
+        "- マッチング結果\n"
+        "- デバッグ情報\n"
+        "- エラー情報"
+    )
+    st.write("保存されたログは開発・検証目的でのみ使用します。")
+    st.write("GitHubなどの公開場所には保存しません。")
+    st.write("同意する場合のみ、チャットを開始できます。")
+
+    choice = st.radio(
+        "ログ保存への同意",
+        ["ログ保存に同意します", "ログ保存に同意しません"],
+        index=None,
+        label_visibility="collapsed",
+    )
+
+    if st.button("チャットを開始する", key="start_chat"):
+        if choice is None:
+            st.warning("同意するかどうかを選択してください。")
+        elif choice == "ログ保存に同意します":
+            ts_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state.consent_status = "accepted"
+            st.session_state.log_consent = True
+            st.session_state.consented_at = ts_str
+            st.session_state.session_id = generate_session_id()
+            record_consent_event(accepted=True)
+            create_initial_session_log()
+            st.rerun()
+        else:
+            st.session_state.consent_status = "declined"
+            st.session_state.log_consent = False
+            record_consent_event(accepted=False)
+            st.rerun()
+
+
+def show_consent_declined_screen():
+    st.warning("ログ保存に同意されなかったため、チャットを開始できません。")
+    st.write(
+        "このMVPでは、品質改善・動作確認のためにログ保存が必要です。\n"
+        "チャットを利用する場合は、前の画面に戻って「ログ保存に同意します」を選択してください。"
+    )
+    if st.button("戻る", key="back_to_consent"):
+        st.session_state.consent_status = None
+        st.session_state.log_consent = None
+        st.rerun()
+
+
+def _reset_chat_state():
+    st.session_state.is_processing = False
+    st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
+    st.session_state.analysis_result = None
+    st.session_state.match_result = None
+    st.session_state.after_match_support = None
+    st.session_state.top_match_candidates = None
+    st.session_state.last_analysis_response = None
+    st.session_state.last_analysis_error = None
+    st.session_state.last_match_response = None
+    st.session_state.last_match_error = None
+    st.session_state.match_details_raw_response = None
+    st.session_state.match_details_error = None
+    st.session_state.selected_candidate_debug = None
+    st.session_state.last_after_match_support_response = None
+    st.session_state.last_after_match_support_error = None
+    st.session_state.last_reply_finish_reason = None
+
+
+def handle_restart():
+    write_debug_log("session_restart_requested", {
+        "level": "INFO",
+        "message": "ユーザーが最初からやり直すボタンを押しました",
+    })
+    save_session_markdown_log(session_status="ended_by_restart", end_reason="user_clicked_restart")
+
+    st.session_state.session_id = generate_session_id()
+    st.session_state.session_log_path = None
+    st.session_state.consented_at = st.session_state.get("consented_at", "")
+
+    _reset_chat_state()
+    create_initial_session_log()
+    st.rerun()
+
+
+def handle_finish():
+    write_debug_log("session_finished_by_user", {
+        "level": "INFO",
+        "message": "ユーザーが終わるボタンを押してセッションを終了しました",
+    })
+    save_session_markdown_log(session_status="completed", end_reason="user_clicked_finish")
+
+    for key in [
+        "consent_status", "log_consent", "consented_at",
+        "session_id", "session_started_at", "session_log_path",
+        "messages", "analysis_result", "match_result", "after_match_support",
+        "top_match_candidates", "last_analysis_response", "last_analysis_error",
+        "last_match_response", "last_match_error", "match_details_raw_response",
+        "match_details_error", "selected_candidate_debug",
+        "last_after_match_support_response", "last_after_match_support_error",
+        "last_reply_finish_reason",
+    ]:
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
+def handle_restart_after_analysis():
+    write_debug_log("session_restart_requested_after_analysis", {
+        "level": "INFO",
+        "message": "分析後にユーザーが最初からやり直すボタンを押しました",
+    })
+    save_session_markdown_log(
+        session_status="ended_by_restart",
+        end_reason="user_clicked_restart_after_analysis",
+    )
+    st.session_state.session_id = generate_session_id()
+    st.session_state.session_log_path = None
+    _reset_chat_state()
+    create_initial_session_log()
+    st.rerun()
 
 
 def load_candidates():
@@ -31,6 +388,21 @@ def initial_question() -> str:
 
 
 def ensure_session_state():
+    ensure_log_dirs()
+    if "consent_status" not in st.session_state:
+        st.session_state.consent_status = None
+    if "log_consent" not in st.session_state:
+        st.session_state.log_consent = None
+    if "consented_at" not in st.session_state:
+        st.session_state.consented_at = None
+    if "session_id" not in st.session_state:
+        st.session_state.session_id = None
+    if "session_started_at" not in st.session_state:
+        st.session_state.session_started_at = None
+    if "session_log_path" not in st.session_state:
+        st.session_state.session_log_path = None
+    if "is_processing" not in st.session_state:
+        st.session_state.is_processing = False
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
     if "analysis_result" not in st.session_state:
@@ -179,6 +551,7 @@ def analyze_user(chat_history):
         "- 会話履歴から具体的な引用を1つ含めること\n\n"
         f"会話履歴:\n{conversation}\n"
     )
+    write_debug_log("analysis_started", {"message_count": len(chat_history)})
     try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -194,18 +567,22 @@ def analyze_user(chat_history):
         analysis = extract_json(st.session_state.last_analysis_response)
         if analysis is None:
             st.session_state.last_analysis_error = "JSON解析に失敗しました。"
+            write_error_log("analysis_json_parse_failed", "JSON解析に失敗しました。")
             return None
 
         is_valid, error_message = validate_analysis_result(analysis)
         if not is_valid:
             st.session_state.last_analysis_error = f"分析結果の形式が不正です: {error_message}"
+            write_error_log("analysis_validation_failed", error_message)
             return None
 
         st.session_state.last_analysis_error = None
+        write_debug_log("analysis_finished")
         return analysis
     except Exception as e:
         st.session_state.last_analysis_error = str(e)
         st.session_state.last_analysis_response = None
+        write_error_log("analysis_exception", str(e))
         return None
 
 
@@ -290,15 +667,49 @@ def build_reason_prompt(analysis, candidate):
 
 
 
-def score_to_label(score):
-    if score >= 0.85:
-        return "かなり相性が高い"
-    elif score >= 0.78:
-        return "相性が良い"
-    elif score >= 0.70:
-        return "可能性あり"
-    else:
-        return "やや慎重に見る相性"
+_MATCH_TYPE_KEYWORDS = {
+    "安心感重視タイプ": ["安心", "落ち着", "信頼", "穏やか", "安定", "安全"],
+    "深い対話タイプ":   ["深い話", "深い対話", "内面", "本音", "感受性", "繊細", "共感"],
+    "境界線尊重タイプ": ["距離感", "ペース", "境界", "尊重", "自立"],
+    "行動伴走タイプ":   ["行動", "挑戦", "一緒に", "伴走", "冒険", "体験", "成長"],
+    "関係継続サポートタイプ": ["続ける", "継続", "返信", "連絡", "長く", "関係を育"],
+    "会話の広がりタイプ": ["雑談", "趣味", "広がり", "楽し", "話題"],
+    "価値観共鳴タイプ": ["考え方", "人生観", "価値観", "共鳴", "共有"],
+}
+
+_SHORT_REASON_TEMPLATES = {
+    "安心感重視タイプ":       "安心感や落ち着いたやり取りを大切にしながら、関係を作りやすい候補です。",
+    "深い対話タイプ":         "深い対話や価値観の共有を通じて、ゆっくり距離を縮めやすい候補です。",
+    "境界線尊重タイプ":       "お互いのペースや距離感を尊重しながら、無理なく関係を進めやすい候補です。",
+    "行動伴走タイプ":         "一緒に行動したり挑戦を共有したりする中で、自然に距離が縮まりやすい候補です。",
+    "関係継続サポートタイプ": "連絡の続け方や関係の育て方を意識しながら、長く関係を作りやすい候補です。",
+    "会話の広がりタイプ":     "日常の話題や趣味の共有から、会話が自然に広がりやすい候補です。",
+    "価値観共鳴タイプ":       "考え方や大切にしている価値観が響き合いやすい候補です。",
+}
+
+
+def assign_match_type(analysis: dict, candidate: dict) -> str:
+    """ユーザー分析と候補者プロフィールのキーワードから相性の種類を返す。APIコール不要。"""
+    combined = " ".join([
+        analysis.get("personality", ""),
+        analysis.get("values", ""),
+        analysis.get("hidden_needs", ""),
+        analysis.get("ideal_partner_type", ""),
+        candidate.get("personality", ""),
+        candidate.get("values", ""),
+        candidate.get("communication_style", ""),
+        candidate.get("relationship_style", ""),
+    ])
+    scores = {label: sum(1 for w in words if w in combined)
+              for label, words in _MATCH_TYPE_KEYWORDS.items()}
+    best = max(scores, key=lambda k: scores[k])
+    return best if scores[best] > 0 else "深い対話タイプ"
+
+
+def generate_short_candidate_reason(analysis: dict, candidate: dict) -> str:
+    """第2・第3候補用の短い説明文を返す。OpenAI APIは使わない。"""
+    match_type = assign_match_type(analysis, candidate)
+    return _SHORT_REASON_TEMPLATES.get(match_type, "あなたの傾向に近い部分がある候補です。")
 
 
 def build_match_result(analysis, candidate, similarity):
@@ -315,7 +726,7 @@ def build_match_result(analysis, candidate, similarity):
     return {
         "matched_candidate": candidate,
         "match_score": min(max(int(similarity * 100), 0), 100),
-        "match_label": score_to_label(similarity),
+        "match_label": assign_match_type(analysis, candidate),
         "match_reason": details.get("reason", ""),
         "possible_concern": details.get("caution", ""),
         "recommended_first_message": details.get("first_message", ""),
@@ -458,61 +869,60 @@ def generate_match(analysis, candidates):
     if analysis is None:
         st.session_state.last_match_error = "分析結果がありません。"
         return None
-    
+
     if not candidates:
         st.session_state.last_match_error = "候補者がありません。"
         return None
-    
+
+    write_debug_log("matching_started", {"candidate_count": len(candidates)})
+
     # ステップ1: 埋め込みベースで候補者を絞る
     top_matches = choose_top_candidates(analysis, candidates, top_n=3)
     if not top_matches:
         st.session_state.last_match_error = "候補者を選出できませんでした。"
+        write_error_log("matching_no_candidates", "候補者を選出できませんでした。")
         return None
-    
+
     st.session_state.top_match_candidates = top_matches
     best_match = top_matches[0]
-    
+
     # ステップ2: AIに詳細なマッチング理由を生成させる
     match_result = build_match_result(analysis, best_match["candidate"], best_match["similarity"])
-    
+
+    if match_result:
+        write_debug_log("matching_finished", {"matched_id": best_match["candidate"].get("id"), "score": best_match["similarity"]})
+
     return match_result
 
 
 def build_after_match_support_prompt(analysis, match_result):
-    """マッチ後支援AIのプロンプトを構築する"""
+    """マッチ後支援AIのプロンプトを構築する（4項目固定）"""
+    candidate = match_result["matched_candidate"]
     return (
-        "あなたはAI分身マッチングのマッチ後支援アシスタントです。"
-        " マッチ後に、2人の関係が続きやすくなるための支援方針を作成してください。\n\n"
-        "以下のユーザー分析とマッチング結果をもとに、関係継続のための具体的な支援方針をJSON形式で出力してください。\n\n"
+        "あなたはAI分身マッチングのマッチ後支援アシスタントです。\n\n"
+        "以下のユーザー分析とマッチ相手の情報をもとに、実際にすぐ使える4項目をJSON形式で出力してください。\n\n"
         "【ユーザー分析】\n"
         f"性格傾向: {analysis.get('personality','')}\n"
         f"価値観: {analysis.get('values','')}\n"
         f"隠れた欲求: {analysis.get('hidden_needs','')}\n"
-        f"会話スタイル: {analysis.get('communication_style','')}\n"
-        f"理想の相手像: {analysis.get('ideal_partner_type','')}\n"
         f"要約: {analysis.get('summary','')}\n\n"
         "【マッチ相手】\n"
-        f"名前: {match_result['matched_candidate'].get('name','')}\n"
-        f"性格: {match_result['matched_candidate'].get('personality','')}\n"
-        f"価値観: {match_result['matched_candidate'].get('values','')}\n"
-        f"会話スタイル: {match_result['matched_candidate'].get('communication_style','')}\n"
-        f"関係性スタイル: {match_result['matched_candidate'].get('relationship_style','')}\n"
-        f"相性スコア: {match_result['match_score']}/100\n\n"
-        "【出力形式】\n"
-        "JSONのみで、以下のキーを必ず含めてください。"
-        " relationship_key_points(関係継続の重要ポイント)、"
-        " first_week_approach(最初の1週間の接し方)、"
-        " questions_to_ask(相手に投げるとよい問い 複数)、"
-        " avoid_behaviors(避けたほうがよい対応)、"
-        " deepening_themes(関係が深まりやすい会話テーマ 複数)、"
-        " support_principle(支援方針・大事にすること)、"
-        " support_type(支援タイプ: relationship_focus, change_tolerance, question_responsive, silence_tolerance, inner_sharing, ai_adaptive からいずれか複数)\n\n"
-        "【重要な観点】\n"
-        "- 単なる恋愛アドバイスではなく、長期的な関係継続を前提とする\n"
-        "- 定期的な問いで関係を更新し、相互理解を深める視点を入れる\n"
-        "- 相手に合う距離感を保ち、無理な連絡頻度を避ける\n"
-        "- ユーザーが安心して関係を育てられる温度感で支援する\n"
-        "- マッチ相手との具体的なマッチングポイントに基づいた支援を心がける"
+        f"名前: {candidate.get('name','')}\n"
+        f"性格: {candidate.get('personality','')}\n"
+        f"会話スタイル: {candidate.get('communication_style','')}\n"
+        f"関係性スタイル: {candidate.get('relationship_style','')}\n\n"
+        "【出力形式】JSONのみ。以下の4キーのみ出力してください。\n"
+        "{\n"
+        '  "first_message_today": "今日実際に送れる一言メッセージ（1〜2文）",\n'
+        '  "question_in_3days": "3日以内に聞くとよい質問（1文）",\n'
+        '  "avoid_phrase": "避けたほうがいい言葉と、その理由（2〜3文）",\n'
+        '  "slow_reply_action": "返信が遅いときにとるべき行動（1〜2文）"\n'
+        "}\n\n"
+        "【制約】\n"
+        "- 抽象的な助言を書かない。実際に送れる文・取れる行動を書く\n"
+        "- 1項目あたり1〜3文以内に収める\n"
+        "- 長い箇条書きは禁止\n"
+        "- JSONのみ出力。Markdownコードブロック禁止"
     )
 
 
@@ -538,6 +948,7 @@ def generate_after_match_support(analysis, match_result):
     
     prompt = build_after_match_support_prompt(analysis, match_result)
     
+    write_debug_log("support_started")
     try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
@@ -550,17 +961,20 @@ def generate_after_match_support(analysis, match_result):
         )
         st.session_state.last_after_match_support_response = response.choices[0].message.content.strip()
         support = extract_json(st.session_state.last_after_match_support_response)
-        
+
         if support is None:
             st.session_state.last_after_match_support_error = "JSON解析に失敗しました。"
+            write_error_log("support_json_parse_failed", "JSON解析に失敗しました。")
             return None
-        
+
         st.session_state.last_after_match_support_error = None
+        write_debug_log("support_finished")
         return support
-        
+
     except Exception as e:
         st.session_state.last_after_match_support_error = str(e)
         st.session_state.last_after_match_support_response = None
+        write_error_log("support_exception", str(e))
         return None
 
 
@@ -604,13 +1018,16 @@ def run_matching():
             st.session_state.after_match_support = after_match_support
         else:
             st.warning("マッチ後支援の生成に失敗しました。今後の機能向上にお役立てします。")
-    
+
+    save_session_markdown_log()
+    write_debug_log("session_log_saved")
+
     return match_result
 
 
 def main():
-    st.set_page_config(page_title="AI分身マッチングMVP", layout="centered")
-    st.title("AI分身マッチングMVP")
+    st.set_page_config(page_title=f"AI分身マッチングMVP v{APP_VERSION}", layout="centered")
+    st.title(f"AI分身マッチングMVP v{APP_VERSION}")
     st.write(
         "AIとの対話を通じて、あなたの性格や価値観を分析し、相性のよさそうな候補者を1人紹介します。"
     )
@@ -620,6 +1037,14 @@ def main():
         return
 
     ensure_session_state()
+
+    if not has_log_consent():
+        if st.session_state.consent_status == "declined":
+            show_consent_declined_screen()
+        else:
+            show_consent_screen()
+        return
+
     render_chat()
 
     user_message = st.chat_input("メッセージを入力してください")
@@ -629,30 +1054,36 @@ def main():
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
         st.rerun()
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("分析してマッチングする"):
-            user_messages = [
-                m for m in st.session_state.messages
-                if m.get("role") == "user" and m.get("content", "").strip()
-            ]
-            if len(user_messages) < 3:
-                st.warning("もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。")
-            else:
-                with st.spinner("分析中です... 少々お待ちください。"):
-                    st.session_state.analysis_result = analyze_user(st.session_state.messages)
-                    if st.session_state.analysis_result is None:
-                        st.error("分析結果を取得できませんでした。もう一度お試しください。")
-                    else:
-                        st.session_state.match_result = run_matching()
-    with col2:
-        if st.button("最初からやり直す"):
-            st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
-            st.session_state.analysis_result = None
-            st.session_state.match_result = None
-            st.session_state.after_match_support = None
-            st.session_state.top_match_candidates = None
-            st.rerun()
+    if st.session_state.get("is_processing", False):
+        st.info("分析中です。しばらくお待ちください。")
+        try:
+            with st.spinner("分析中です... 少々お待ちください。"):
+                st.session_state.analysis_result = analyze_user(st.session_state.messages)
+            if st.session_state.analysis_result is not None:
+                st.session_state.match_result = run_matching()
+        except Exception as e:
+            write_error_log("analysis_processing_exception", str(e))
+        finally:
+            st.session_state.is_processing = False
+        st.rerun()
+    else:
+        if st.session_state.get("last_analysis_error") and not st.session_state.analysis_result:
+            st.error("分析結果を取得できませんでした。もう一度お試しください。")
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("分析してマッチングする", key="analyze_and_match"):
+                user_messages = [
+                    m for m in st.session_state.messages
+                    if m.get("role") == "user" and m.get("content", "").strip()
+                ]
+                if len(user_messages) < 3:
+                    st.warning("もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。")
+                else:
+                    st.session_state.is_processing = True
+                    st.rerun()
+        with col2:
+            if st.button("最初からやり直す", key="restart_during_chat"):
+                handle_restart()
 
     if st.session_state.analysis_result:
         st.markdown("---")
@@ -683,9 +1114,13 @@ def main():
             if other_candidates:
                 st.markdown("---")
                 st.markdown("**他にも相性が近かった候補者:**")
+                analysis = st.session_state.analysis_result or {}
                 for idx, item in enumerate(other_candidates, start=2):
-                    other_name = item['candidate'].get('name', '未設定')
-                    st.write(f"{idx}位: {other_name}")
+                    c = item['candidate']
+                    other_name = c.get('name', '未設定')
+                    reason = generate_short_candidate_reason(analysis, c)
+                    st.write(f"**{idx}位: {other_name}**")
+                    st.caption(reason)
 
         st.markdown("---")
         st.caption("このマッチングはAIによる分析に基づいています。実際の相性は対話を通じて確かめてください。")
@@ -694,21 +1129,21 @@ def main():
         st.markdown("---")
         st.subheader("マッチ後支援")
         support = st.session_state.after_match_support
-        
-        render_support_field("関係継続の重要ポイント", support.get('relationship_key_points','-'))
-        render_support_field("最初の1週間の接し方", support.get('first_week_approach','-'))
-        render_support_field("相手に投げるとよい問い", support.get('questions_to_ask','-'))
-        render_support_field("避けたほうがよい対応", support.get('avoid_behaviors','-'))
-        render_support_field("関係が深まりやすい会話テーマ", support.get('deepening_themes','-'))
-        render_support_field("支援方針・大事にすること", support.get('support_principle','-'))
-        
-        if support.get('support_type'):
-            support_types = support.get('support_type')
-            if isinstance(support_types, list):
-                support_type_str = " / ".join(support_types)
-            else:
-                support_type_str = str(support_types)
-            st.write(f"**支援タイプ:** {support_type_str}")
+
+        render_support_field("今日送る一言", support.get('first_message_today', '-'))
+        render_support_field("3日以内に聞く質問", support.get('question_in_3days', '-'))
+        render_support_field("避けたほうがいい一言", support.get('avoid_phrase', '-'))
+        render_support_field("返信が遅いときの対応", support.get('slow_reply_action', '-'))
+
+    if st.session_state.match_result and not st.session_state.get("is_processing", False):
+        st.markdown("---")
+        fin_col1, fin_col2 = st.columns(2)
+        with fin_col1:
+            if st.button("最初からやり直す", key="restart_after_analysis_v003"):
+                handle_restart_after_analysis()
+        with fin_col2:
+            if st.button("終わる", key="finish_after_analysis_v003"):
+                handle_finish()
 
     with st.expander("デバッグ情報（開発用）", expanded=False):
         st.write("messages:", st.session_state.messages)
