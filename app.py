@@ -40,12 +40,23 @@ def get_log_paths():
     }
 
 
+def generate_session_id() -> str:
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"session_{ts}_{uuid.uuid4().hex[:6]}"
+
+
+def get_or_create_session_id() -> str:
+    if not st.session_state.get("session_id"):
+        st.session_state.session_id = generate_session_id()
+    return st.session_state.session_id
+
+
 def write_debug_log(event: str, data=None):
     try:
         paths = get_log_paths()
         entry = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-            "session_id": st.session_state.get("session_id", "unknown"),
+            "session_id": get_or_create_session_id(),
             "event": event,
         }
         if data is not None:
@@ -61,7 +72,7 @@ def write_error_log(event: str, error_message: str, data=None):
         paths = get_log_paths()
         entry = {
             "ts": datetime.datetime.now().isoformat(timespec="seconds"),
-            "session_id": st.session_state.get("session_id", "unknown"),
+            "session_id": get_or_create_session_id(),
             "event": event,
             "error": error_message,
         }
@@ -73,17 +84,28 @@ def write_error_log(event: str, error_message: str, data=None):
         st.warning("エラーログの書き込みに失敗しました（アプリの動作には影響しません）。")
 
 
-def save_session_markdown_log():
+def save_session_markdown_log(session_status: str = "completed", end_reason: str = None):
     try:
-        run_id = st.session_state.get("current_run_id", "unknown")
-        paths = get_log_paths()
-        lines = [
-            f"# セッションログ: {run_id}",
-            f"- バージョン: {APP_VERSION}",
-            f"- 保存時刻: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+        session_id = get_or_create_session_id()
+        consent_value = str(st.session_state.get("log_consent", "")).lower()
+        consented_at = st.session_state.get("consented_at", "")
+        started_at = st.session_state.get("session_started_at", consented_at)
+        ended_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        session_info = [
+            "# AI分身マッチングMVP ログ",
             "",
-            "## 会話履歴",
+            "## セッション情報",
+            f"- app_version: v{APP_VERSION}",
+            f"- session_id: {session_id}",
+            f"- started_at: {started_at}",
+            f"- ended_at: {ended_at}",
+            f"- log_consent: {consent_value}",
+            f"- consented_at: {consented_at}",
+            f"- session_status: {session_status}",
         ]
+        if end_reason:
+            session_info.append(f"- end_reason: {end_reason}")
+        lines = session_info + ["", "## チャット履歴"]
         for msg in st.session_state.get("messages", []):
             role = msg.get("role", "")
             content = msg.get("content", "")
@@ -138,11 +160,221 @@ def save_session_markdown_log():
                 f"返信が遅いときの対応: {support.get('slow_reply_action', '')}",
             ]
 
-        log_path = paths["sessions_dir"] / f"{run_id}.md"
+        log_path_str = st.session_state.get("session_log_path")
+        if log_path_str:
+            log_path = Path(log_path_str)
+        else:
+            paths = get_log_paths()
+            log_path = paths["sessions_dir"] / f"{session_id}.md"
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
     except Exception:
         st.warning("セッションログの保存に失敗しました（アプリの動作には影響しません）。")
+
+
+def create_initial_session_log():
+    try:
+        write_debug_log("session_markdown_initial_save_started", {
+            "level": "INFO",
+            "message": "初期session Markdownログの保存を開始しました",
+        })
+        session_id = get_or_create_session_id()
+        parts = session_id.split("_")
+        if len(parts) == 4 and parts[0] == "session":
+            ts = f"{parts[1]}_{parts[2]}"
+            short_id = parts[3]
+        else:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            short_id = "unknown"
+        filename = f"session_{ts}_v{APP_VERSION}_{short_id}.md"
+
+        paths = get_log_paths()
+        log_path = paths["sessions_dir"] / filename
+
+        started_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        st.session_state.session_started_at = started_at
+        consented_at = st.session_state.get("consented_at", started_at)
+        consent_value = str(st.session_state.get("log_consent", "")).lower()
+        lines = [
+            "# AI分身マッチングMVP ログ",
+            "",
+            "## セッション情報",
+            f"- app_version: v{APP_VERSION}",
+            f"- session_id: {session_id}",
+            f"- started_at: {started_at}",
+            "- ended_at: 未完了",
+            f"- log_consent: {consent_value}",
+            f"- consented_at: {consented_at}",
+            "- session_status: started",
+            "",
+            "## チャット履歴",
+            "",
+            "まだチャット履歴はありません。",
+            "",
+            "## 分析結果",
+            "",
+            "まだ分析結果はありません。",
+            "",
+            "## マッチング結果",
+            "",
+            "まだマッチング結果はありません。",
+        ]
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        st.session_state.session_log_path = str(log_path)
+        write_debug_log("session_markdown_initial_save_finished", {
+            "level": "INFO",
+            "message": "初期session Markdownログの保存が完了しました",
+            "path": str(log_path),
+        })
+    except Exception as e:
+        write_debug_log("session_markdown_initial_save_failed", {
+            "level": "ERROR",
+            "message": "初期session Markdownログの保存に失敗しました",
+        })
+        write_error_log("session_markdown_initial_save_failed", str(e))
+        st.warning("初期セッションログの作成に失敗しました（アプリの動作には影響しません）。")
+
+
+def has_log_consent() -> bool:
+    return st.session_state.get("consent_status") == "accepted"
+
+
+def record_consent_event(accepted: bool):
+    if accepted:
+        write_debug_log("log_consent_accepted", {
+            "level": "INFO",
+            "message": "ユーザーがログ保存に同意しました",
+        })
+    else:
+        write_debug_log("log_consent_declined", {
+            "level": "INFO",
+            "message": "ユーザーがログ保存に同意しませんでした",
+        })
+
+
+def show_consent_screen():
+    st.subheader("ログ保存への同意確認")
+    st.write("このアプリでは、品質改善・動作確認のため、以下の情報を保存します。")
+    st.markdown(
+        "- チャット履歴\n"
+        "- 分析結果\n"
+        "- マッチング結果\n"
+        "- デバッグ情報\n"
+        "- エラー情報"
+    )
+    st.write("保存されたログは開発・検証目的でのみ使用します。")
+    st.write("GitHubなどの公開場所には保存しません。")
+    st.write("同意する場合のみ、チャットを開始できます。")
+
+    choice = st.radio(
+        "ログ保存への同意",
+        ["ログ保存に同意します", "ログ保存に同意しません"],
+        index=None,
+        label_visibility="collapsed",
+    )
+
+    if st.button("チャットを開始する", key="start_chat"):
+        if choice is None:
+            st.warning("同意するかどうかを選択してください。")
+        elif choice == "ログ保存に同意します":
+            ts_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            st.session_state.consent_status = "accepted"
+            st.session_state.log_consent = True
+            st.session_state.consented_at = ts_str
+            st.session_state.session_id = generate_session_id()
+            record_consent_event(accepted=True)
+            create_initial_session_log()
+            st.rerun()
+        else:
+            st.session_state.consent_status = "declined"
+            st.session_state.log_consent = False
+            record_consent_event(accepted=False)
+            st.rerun()
+
+
+def show_consent_declined_screen():
+    st.warning("ログ保存に同意されなかったため、チャットを開始できません。")
+    st.write(
+        "このMVPでは、品質改善・動作確認のためにログ保存が必要です。\n"
+        "チャットを利用する場合は、前の画面に戻って「ログ保存に同意します」を選択してください。"
+    )
+    if st.button("戻る", key="back_to_consent"):
+        st.session_state.consent_status = None
+        st.session_state.log_consent = None
+        st.rerun()
+
+
+def _reset_chat_state():
+    st.session_state.is_processing = False
+    st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
+    st.session_state.analysis_result = None
+    st.session_state.match_result = None
+    st.session_state.after_match_support = None
+    st.session_state.top_match_candidates = None
+    st.session_state.last_analysis_response = None
+    st.session_state.last_analysis_error = None
+    st.session_state.last_match_response = None
+    st.session_state.last_match_error = None
+    st.session_state.match_details_raw_response = None
+    st.session_state.match_details_error = None
+    st.session_state.selected_candidate_debug = None
+    st.session_state.last_after_match_support_response = None
+    st.session_state.last_after_match_support_error = None
+    st.session_state.last_reply_finish_reason = None
+
+
+def handle_restart():
+    write_debug_log("session_restart_requested", {
+        "level": "INFO",
+        "message": "ユーザーが最初からやり直すボタンを押しました",
+    })
+    save_session_markdown_log(session_status="ended_by_restart", end_reason="user_clicked_restart")
+
+    st.session_state.session_id = generate_session_id()
+    st.session_state.session_log_path = None
+    st.session_state.consented_at = st.session_state.get("consented_at", "")
+
+    _reset_chat_state()
+    create_initial_session_log()
+    st.rerun()
+
+
+def handle_finish():
+    write_debug_log("session_finished_by_user", {
+        "level": "INFO",
+        "message": "ユーザーが終わるボタンを押してセッションを終了しました",
+    })
+    save_session_markdown_log(session_status="completed", end_reason="user_clicked_finish")
+
+    for key in [
+        "consent_status", "log_consent", "consented_at",
+        "session_id", "session_started_at", "session_log_path",
+        "messages", "analysis_result", "match_result", "after_match_support",
+        "top_match_candidates", "last_analysis_response", "last_analysis_error",
+        "last_match_response", "last_match_error", "match_details_raw_response",
+        "match_details_error", "selected_candidate_debug",
+        "last_after_match_support_response", "last_after_match_support_error",
+        "last_reply_finish_reason",
+    ]:
+        st.session_state.pop(key, None)
+    st.rerun()
+
+
+def handle_restart_after_analysis():
+    write_debug_log("session_restart_requested_after_analysis", {
+        "level": "INFO",
+        "message": "分析後にユーザーが最初からやり直すボタンを押しました",
+    })
+    save_session_markdown_log(
+        session_status="ended_by_restart",
+        end_reason="user_clicked_restart_after_analysis",
+    )
+    st.session_state.session_id = generate_session_id()
+    st.session_state.session_log_path = None
+    _reset_chat_state()
+    create_initial_session_log()
+    st.rerun()
 
 
 def load_candidates():
@@ -157,9 +389,20 @@ def initial_question() -> str:
 
 def ensure_session_state():
     ensure_log_dirs()
+    if "consent_status" not in st.session_state:
+        st.session_state.consent_status = None
+    if "log_consent" not in st.session_state:
+        st.session_state.log_consent = None
+    if "consented_at" not in st.session_state:
+        st.session_state.consented_at = None
     if "session_id" not in st.session_state:
-        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        st.session_state.session_id = f"session_{ts}_{uuid.uuid4().hex[:6]}"
+        st.session_state.session_id = None
+    if "session_started_at" not in st.session_state:
+        st.session_state.session_started_at = None
+    if "session_log_path" not in st.session_state:
+        st.session_state.session_log_path = None
+    if "is_processing" not in st.session_state:
+        st.session_state.is_processing = False
     if "messages" not in st.session_state:
         st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
     if "analysis_result" not in st.session_state:
@@ -794,6 +1037,14 @@ def main():
         return
 
     ensure_session_state()
+
+    if not has_log_consent():
+        if st.session_state.consent_status == "declined":
+            show_consent_declined_screen()
+        else:
+            show_consent_screen()
+        return
+
     render_chat()
 
     user_message = st.chat_input("メッセージを入力してください")
@@ -803,32 +1054,36 @@ def main():
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
         st.rerun()
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("分析してマッチングする"):
-            user_messages = [
-                m for m in st.session_state.messages
-                if m.get("role") == "user" and m.get("content", "").strip()
-            ]
-            if len(user_messages) < 3:
-                st.warning("もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。")
-            else:
-                ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                st.session_state.current_run_id = f"session_{ts}_{uuid.uuid4().hex[:6]}"
-                with st.spinner("分析中です... 少々お待ちください。"):
-                    st.session_state.analysis_result = analyze_user(st.session_state.messages)
-                    if st.session_state.analysis_result is None:
-                        st.error("分析結果を取得できませんでした。もう一度お試しください。")
-                    else:
-                        st.session_state.match_result = run_matching()
-    with col2:
-        if st.button("最初からやり直す"):
-            st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
-            st.session_state.analysis_result = None
-            st.session_state.match_result = None
-            st.session_state.after_match_support = None
-            st.session_state.top_match_candidates = None
-            st.rerun()
+    if st.session_state.get("is_processing", False):
+        st.info("分析中です。しばらくお待ちください。")
+        try:
+            with st.spinner("分析中です... 少々お待ちください。"):
+                st.session_state.analysis_result = analyze_user(st.session_state.messages)
+            if st.session_state.analysis_result is not None:
+                st.session_state.match_result = run_matching()
+        except Exception as e:
+            write_error_log("analysis_processing_exception", str(e))
+        finally:
+            st.session_state.is_processing = False
+        st.rerun()
+    else:
+        if st.session_state.get("last_analysis_error") and not st.session_state.analysis_result:
+            st.error("分析結果を取得できませんでした。もう一度お試しください。")
+        col1, col2 = st.columns([1, 1])
+        with col1:
+            if st.button("分析してマッチングする", key="analyze_and_match"):
+                user_messages = [
+                    m for m in st.session_state.messages
+                    if m.get("role") == "user" and m.get("content", "").strip()
+                ]
+                if len(user_messages) < 3:
+                    st.warning("もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。")
+                else:
+                    st.session_state.is_processing = True
+                    st.rerun()
+        with col2:
+            if st.button("最初からやり直す", key="restart_during_chat"):
+                handle_restart()
 
     if st.session_state.analysis_result:
         st.markdown("---")
@@ -879,6 +1134,16 @@ def main():
         render_support_field("3日以内に聞く質問", support.get('question_in_3days', '-'))
         render_support_field("避けたほうがいい一言", support.get('avoid_phrase', '-'))
         render_support_field("返信が遅いときの対応", support.get('slow_reply_action', '-'))
+
+    if st.session_state.match_result and not st.session_state.get("is_processing", False):
+        st.markdown("---")
+        fin_col1, fin_col2 = st.columns(2)
+        with fin_col1:
+            if st.button("最初からやり直す", key="restart_after_analysis_v003"):
+                handle_restart_after_analysis()
+        with fin_col2:
+            if st.button("終わる", key="finish_after_analysis_v003"):
+                handle_finish()
 
     with st.expander("デバッグ情報（開発用）", expanded=False):
         st.write("messages:", st.session_state.messages)
