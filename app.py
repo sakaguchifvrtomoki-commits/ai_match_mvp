@@ -495,6 +495,14 @@ html, body {{
         height: 40px !important;
         min-height: 40px !important;
     }}
+        /* Streamlit Cloud 右下ロゴと重ならないように下部バーの右端を空ける */
+    .fairies-bottom-bar {{
+        padding-right: 76px !important;
+    }}
+
+    .bottom-bar-btn {{
+        font-size: 11px !important;
+    }}
 }}
 
 /* スマホ下部バー: 分析後の専用トリガーボタンを視覚的に非表示
@@ -515,6 +523,7 @@ html, body {{
     left: 0;
     right: 0;
     height: 56px;
+    padding-right: 84px;
     background: rgba(255, 255, 255, 0.97);
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
@@ -1296,71 +1305,6 @@ def render_mobile_bottom_bar():
                 return true;
             }}
 
-            function hideStreamlitFloatingUi() {{
-                var p = window.parent.document;
-
-                // Streamlit Cloud の右下固定UIを候補として広めに探す
-                var candidates = p.querySelectorAll(
-                    'a, button, div, iframe, section'
-                );
-
-                for (var i = 0; i < candidates.length; i++) {{
-                    var el = candidates[i];
-                    var style = window.parent.getComputedStyle(el);
-
-                    // fixed / sticky 以外は対象外
-                    if (style.position !== 'fixed' && style.position !== 'sticky') {{
-                        continue;
-                    }}
-
-                    var rect = el.getBoundingClientRect();
-                    var vw = window.parent.innerWidth;
-                    var vh = window.parent.innerHeight;
-
-                    // 右下付近にある要素だけを見る
-                    var isBottomRight =
-                        rect.right > vw - 180 &&
-                        rect.bottom > vh - 140;
-
-                    if (!isBottomRight) {{
-                        continue;
-                    }}
-
-                    // フェアリーズの下部バー自体は消さない
-                    if (el.closest && el.closest('.fairies-bottom-bar')) {{
-                        continue;
-                    }}
-
-                    var text = (el.textContent || '').toLowerCase();
-                    var aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                    var title = (el.getAttribute('title') || '').toLowerCase();
-                    var html = (el.innerHTML || '').toLowerCase();
-
-                    var looksLikeStreamlit =
-                        text.indexOf('streamlit') !== -1 ||
-                        text.indexOf('fork') !== -1 ||
-                        aria.indexOf('streamlit') !== -1 ||
-                        title.indexOf('streamlit') !== -1 ||
-                        html.indexOf('streamlit') !== -1 ||
-                        html.indexOf('github') !== -1 ||
-                        html.indexOf('fork') !== -1;
-
-                    // 右下の大きめ固定ボタンも消す
-                    var looksLikeFloatingButton =
-                        rect.width >= 40 &&
-                        rect.height >= 40 &&
-                        rect.width <= 180 &&
-                        rect.height <= 120;
-
-                    if (looksLikeStreamlit || looksLikeFloatingButton) {{
-                        el.style.display = 'none';
-                        el.style.visibility = 'hidden';
-                        el.style.pointerEvents = 'none';
-                        el.style.opacity = '0';
-                    }}
-                }}
-            }}
-
             function setup() {{
                 var p = window.parent.document;
                 var bar = p.querySelector('.fairies-bottom-bar');
@@ -1374,7 +1318,6 @@ def render_mobile_bottom_bar():
 
                 hidePcBtns();
                 hideTriggerBtns();
-                hideStreamlitFloatingUi();
                 bindBarButtons();
 
                 var observer = new MutationObserver(function() {{
@@ -1382,7 +1325,6 @@ def render_mobile_bottom_bar():
                     debounceTimer = setTimeout(function() {{
                         hidePcBtns();
                         hideTriggerBtns();
-                        hideStreamlitFloatingUi();
                         bindBarButtons();
                     }}, 80);
                 }});
