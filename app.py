@@ -1,4 +1,6 @@
+import base64
 import datetime
+import html as html_lib
 import json
 import math
 import os
@@ -7,12 +9,15 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
-APP_VERSION = "0.0.3"
+APP_VERSION = "0.0.4"
+
+GOOGLE_FORM_URL = "https://docs.google.com/forms/d/1DckZthofdyKi4dK1f7XgmFrwxiV7Im_5RTieg5Kz7Fs/viewform"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
@@ -23,6 +28,589 @@ def get_openai_client():
     if not OPENAI_API_KEY:
         return None
     return OpenAI(api_key=OPENAI_API_KEY)
+
+
+@st.cache_data
+def get_image_base64(relative_path: str) -> str:
+    try:
+        path = Path(__file__).parent / relative_path
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def inject_custom_css():
+    bg_b64 = get_image_base64("assets/fairies_ai_BG.png")
+    btn_b64 = get_image_base64("assets/fairies_ai_button.png")
+
+    bg_css = (
+        f"url('data:image/png;base64,{bg_b64}')"
+        if bg_b64
+        else "linear-gradient(135deg, #e8f4fd 0%, #c8dff5 100%)"
+    )
+    btn_css = f"url('data:image/png;base64,{btn_b64}')" if btn_b64 else ""
+
+    st.markdown(f"""
+<style>
+/* ===== 背景 ===== */
+.stApp {{
+    background-image: {bg_css};
+    background-size: cover;
+    background-position: center;
+    background-attachment: fixed;
+    background-repeat: no-repeat;
+}}
+.stApp > .main,
+.stApp .main > div,
+.block-container,
+.stMainBlockContainer {{
+    background: transparent !important;
+    background-color: transparent !important;
+}}
+header[data-testid="stHeader"] {{
+    background: transparent !important;
+    background-color: transparent !important;
+}}
+[data-testid="stDecoration"] {{
+    display: none !important;
+}}
+
+/* ===== フェアリーズタイトル ===== */
+.fairies-header {{
+    text-align: center;
+    padding: 10px 0 16px 0;
+}}
+.fairies-header h1 {{
+    font-size: 32px;
+    font-weight: 700;
+    color: #fff;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.45), 0 1px 2px rgba(0,0,0,0.3);
+    margin: 0 0 4px 0;
+    letter-spacing: 0.05em;
+}}
+.fairies-header .ver-badge {{
+    display: inline-block;
+    font-size: 11px;
+    color: rgba(255,255,255,0.88);
+    background: rgba(0,0,0,0.22);
+    border-radius: 10px;
+    padding: 2px 9px;
+    letter-spacing: 0.06em;
+}}
+
+/* ===== チャット吹き出しコンテナ ===== */
+.chat-container {{
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 8px 4px;
+    width: 100%;
+    box-sizing: border-box;
+    overflow-x: hidden;
+}}
+
+/* ===== AI吹き出し（左） ===== */
+.chat-row-ai {{
+    display: flex;
+    flex-direction: row;
+    align-items: flex-end;
+    gap: 8px;
+    max-width: 100%;
+}}
+.ai-icon {{
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    flex-shrink: 0;
+    border: 2px solid rgba(255,255,255,0.75);
+    box-shadow: 0 1px 4px rgba(0,0,0,0.18);
+}}
+.bubble-ai {{
+    background: rgba(245, 250, 255, 0.93);
+    color: #2c2c2c;
+    border-radius: 4px 18px 18px 18px;
+    padding: 10px 14px;
+    max-width: 80%;
+    font-size: 15px;
+    line-height: 1.65;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    word-break: break-word;
+    white-space: pre-wrap;
+}}
+
+/* ===== ユーザー吹き出し（右） ===== */
+.chat-row-user {{
+    display: flex;
+    flex-direction: row-reverse;
+    align-items: flex-end;
+    gap: 8px;
+    max-width: 100%;
+}}
+.bubble-user {{
+    background: rgba(162, 214, 248, 0.92);
+    color: #1a1a2e;
+    border-radius: 18px 4px 18px 18px;
+    padding: 10px 14px;
+    max-width: 80%;
+    font-size: 15px;
+    line-height: 1.65;
+    box-shadow: 0 2px 6px rgba(0,0,0,0.1);
+    word-break: break-word;
+    white-space: pre-wrap;
+}}
+
+/* ===== 送信ボタン（画像スタイル） ===== */
+[data-testid="stChatInputSubmitButton"],
+[data-testid="stChatInputSubmitButton"] button {{
+    background-image: {btn_css};
+    background-size: 80%;
+    background-repeat: no-repeat;
+    background-position: center;
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    width: 46px !important;
+    height: 46px !important;
+    min-height: 46px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+}}
+[data-testid="stChatInputSubmitButton"] svg,
+[data-testid="stChatInputSubmitButton"] button svg {{
+    display: none !important;
+}}
+
+/* ===== チャット入力フォーム（st.form方式） ===== */
+
+/* フォーム枠・背景を消す */
+[data-testid="stForm"] {{
+    border: none !important;
+    padding: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}}
+
+/* stVerticalBlock を flex row で横並び1行に */
+[data-testid="stForm"] [data-testid="stVerticalBlock"] {{
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 8px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}}
+
+/* 入力補助テキスト（Press Enter to submit form）を非表示 */
+[data-testid="InputInstructions"] {{
+    display: none !important;
+}}
+
+/* テキストエリアが残り幅を使う */
+[data-testid="stForm"] [data-testid="stTextArea"] {{
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    margin-bottom: 0 !important;
+}}
+[data-testid="stForm"] [data-testid="stTextArea"] textarea {{
+    border-radius: 20px !important;
+    background: rgba(255,255,255,0.88) !important;
+    border: 1px solid rgba(100,160,220,0.35) !important;
+    padding-left: 14px !important;
+    padding-right: 12px !important;
+    font-size: 15px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    resize: none !important;
+    line-height: 1.5 !important;
+}}
+
+/* 送信ボタンを固定幅・画像化 */
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+    flex: 0 0 48px !important;
+    width: 48px !important;
+    min-width: 48px !important;
+    margin-bottom: 0 !important;
+}}
+[data-testid="stFormSubmitButton"] button {{
+    background-image: {btn_css};
+    background-size: 80% !important;
+    background-repeat: no-repeat !important;
+    background-position: center !important;
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    width: 48px !important;
+    height: 48px !important;
+    min-height: 48px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    color: transparent !important;
+}}
+[data-testid="stFormSubmitButton"] button p,
+[data-testid="stFormSubmitButton"] button [data-testid="stMarkdownContainer"],
+[data-testid="stFormSubmitButton"] button svg {{
+    display: none !important;
+}}
+
+/* ===== 結果カード（白背景） ===== */
+.result-card {{
+    background: rgba(255, 255, 255, 0.96);
+    border-radius: 14px;
+    padding: 18px 20px;
+    margin: 14px 0;
+    box-shadow: 0 3px 12px rgba(0,0,0,0.12);
+    color: #2c2c2c;
+}}
+.result-card-title {{
+    font-size: 17px;
+    font-weight: 700;
+    color: #1a3a5c;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 2px solid rgba(100,160,220,0.3);
+}}
+.result-card p {{
+    margin: 6px 0;
+    line-height: 1.65;
+    font-size: 14px;
+    color: #2c2c2c;
+}}
+.result-card ul {{
+    margin: 4px 0 8px 0;
+    padding-left: 20px;
+    font-size: 14px;
+    color: #2c2c2c;
+}}
+.result-label {{
+    font-weight: 600;
+    color: #2c5f8a;
+    margin-right: 4px;
+}}
+.result-note {{
+    margin-top: 12px !important;
+    padding: 8px 12px !important;
+    background: rgba(100,160,220,0.12);
+    border-radius: 8px;
+    font-size: 13px;
+    color: #555 !important;
+}}
+.result-success {{
+    background: rgba(50,200,100,0.1);
+    border-left: 3px solid #2ea85c;
+    padding: 8px 12px;
+    border-radius: 0 8px 8px 0;
+    margin: 8px 0;
+    font-size: 14px;
+    line-height: 1.65;
+    color: #1a3a1a;
+}}
+.result-warning {{
+    background: rgba(255,200,50,0.12);
+    border-left: 3px solid #d49000;
+    padding: 8px 12px;
+    border-radius: 0 8px 8px 0;
+    margin: 8px 0;
+    font-size: 14px;
+    line-height: 1.65;
+    color: #3a2a00;
+}}
+.result-info {{
+    background: rgba(100,160,220,0.12);
+    border-left: 3px solid #5b9bd5;
+    padding: 8px 12px;
+    border-radius: 0 8px 8px 0;
+    margin: 8px 0;
+    font-size: 14px;
+    line-height: 1.65;
+    color: #0a2a4a;
+}}
+.result-divider {{
+    border: none;
+    border-top: 1px solid rgba(100,160,220,0.2);
+    margin: 12px 0;
+}}
+
+/* ===== 背景上テキスト可読性（白縁取り: -webkit-text-stroke方式） ===== */
+.stApp p, .stApp li,
+.stApp h2, .stApp h3,
+.stApp label,
+[data-testid="stMarkdownContainer"] p,
+[data-testid="stMarkdownContainer"] li {{
+    color: #111 !important;
+    -webkit-text-stroke: 4px rgba(255, 255, 255, 0.9);
+    paint-order: stroke fill;
+    text-shadow: none !important;
+}}
+/* カード内・吹き出し内はリセット */
+.result-card p, .result-card li, .result-card h2, .result-card h3,
+.result-card span, .result-card strong, .result-card div {{
+    color: inherit !important;
+    -webkit-text-stroke: 0 !important;
+    paint-order: normal !important;
+    text-shadow: none !important;
+}}
+.bubble-ai, .bubble-user {{
+    -webkit-text-stroke: 0 !important;
+    paint-order: normal !important;
+    text-shadow: none !important;
+}}
+
+/* ===== 横スクロール防止（全幅） ===== */
+html, body {{
+    overflow-x: hidden !important;
+    max-width: 100% !important;
+}}
+.stApp {{
+    overflow-x: hidden !important;
+}}
+* {{
+    box-sizing: border-box;
+}}
+
+/* ===== スマホ・タブレット対応（768px以下） ===== */
+@media (max-width: 768px) {{
+
+    /* Streamlit デフォルト余白を削減 */
+    .block-container,
+    .stMainBlockContainer {{
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+        padding-top: 16px !important;
+        padding-bottom: 80px !important;
+        max-width: 100% !important;
+    }}
+
+    /* タイトル */
+    .fairies-header h1 {{ font-size: 26px; }}
+    .fairies-header {{ padding: 8px 0 12px 0; }}
+
+    /* 吹き出し */
+    .bubble-ai, .bubble-user {{
+        font-size: 14px;
+        max-width: 85%;
+        padding: 9px 12px;
+    }}
+    .chat-row-ai, .chat-row-user {{ gap: 6px; }}
+    .ai-icon {{ width: 36px; height: 36px; }}
+    .chat-container {{ gap: 10px; padding: 6px 2px; }}
+
+    /* 結果カード */
+    .result-card {{
+        padding: 14px 16px;
+        margin: 10px 0;
+        border-radius: 12px;
+    }}
+    .result-card p,
+    .result-card ul,
+    .result-card li {{
+        font-size: 13px;
+    }}
+    .result-card-title {{ font-size: 15px; }}
+    .result-success,
+    .result-warning,
+    .result-info {{
+        font-size: 13px;
+        padding: 7px 10px;
+    }}
+    .result-note {{ font-size: 12px; }}
+
+    /* チャット入力欄（768px以下） */
+    [data-testid="stForm"] [data-testid="stTextArea"] textarea {{
+        font-size: 14px !important;
+    }}
+    [data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+        flex: 0 0 44px !important;
+        width: 44px !important;
+        min-width: 44px !important;
+    }}
+    [data-testid="stFormSubmitButton"] button {{
+        width: 44px !important;
+        height: 44px !important;
+        min-height: 44px !important;
+    }}
+}}
+
+/* ===== スマホ専用（480px以下） ===== */
+@media (max-width: 480px) {{
+
+    /* さらに余白を削減 */
+    .block-container,
+    .stMainBlockContainer {{
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+        padding-top: 12px !important;
+    }}
+
+    /* タイトル */
+    .fairies-header h1 {{ font-size: 22px; letter-spacing: 0.02em; }}
+    .fairies-header .ver-badge {{ font-size: 10px; }}
+
+    /* 吹き出し */
+    .bubble-ai, .bubble-user {{
+        font-size: 13px;
+        max-width: 88%;
+        padding: 8px 10px;
+        line-height: 1.6;
+    }}
+    .ai-icon {{ width: 32px; height: 32px; }}
+
+    /* 結果カード */
+    .result-card {{
+        padding: 12px 13px;
+        border-radius: 10px;
+        margin: 8px 0;
+    }}
+    .result-card p,
+    .result-card ul,
+    .result-card li {{
+        font-size: 12px;
+    }}
+    .result-card-title {{ font-size: 14px; margin-bottom: 10px; }}
+    .result-success,
+    .result-warning,
+    .result-info {{
+        font-size: 12px;
+        padding: 6px 9px;
+    }}
+
+    /* チャット入力欄（480px以下） */
+    [data-testid="stForm"] [data-testid="stVerticalBlock"] {{
+        gap: 6px !important;
+    }}
+    [data-testid="stForm"] [data-testid="stTextArea"] textarea {{
+        font-size: 13px !important;
+        padding-left: 12px !important;
+    }}
+    [data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+        flex: 0 0 40px !important;
+        width: 40px !important;
+        min-width: 40px !important;
+    }}
+    [data-testid="stFormSubmitButton"] button {{
+        width: 40px !important;
+        height: 40px !important;
+        min-height: 40px !important;
+    }}
+}}
+
+/* スマホ下部バー: 分析後の専用トリガーボタンを視覚的に非表示
+   height:0 + overflow:hidden で折りたたみ、DOM には残して JS の .click() が届く */
+[data-testid="stMarkdownContainer"]:has(.mobile-post-triggers) ~ [data-testid="stButton"] {{
+    height: 0 !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}}
+
+/* ===== スマホ下部固定バー ===== */
+.fairies-bottom-bar {{
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    background: rgba(255, 255, 255, 0.97);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-top: 1.5px solid rgba(100, 160, 220, 0.45);
+    z-index: 9999;
+    flex-direction: row;
+    align-items: stretch;
+    box-shadow: 0 -3px 14px rgba(0,0,0,0.18);
+    box-sizing: border-box;
+    overflow: hidden;
+}}
+.fairies-bottom-bar * {{
+    -webkit-text-stroke: 0 !important;
+    paint-order: normal !important;
+    text-shadow: none !important;
+    box-sizing: border-box;
+}}
+.bottom-bar-kb {{
+    flex: 0 0 54px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-right: 1.5px solid rgba(100, 160, 220, 0.4);
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}}
+.bottom-bar-kb img {{
+    width: 26px;
+    height: 26px;
+    object-fit: contain;
+    opacity: 0.88;
+    pointer-events: none;
+}}
+.bottom-bar-actions {{
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    min-width: 0;
+}}
+.bottom-bar-btn {{
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #1a3570 !important;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    padding: 4px 2px;
+    text-align: center;
+    line-height: 1.3;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    min-width: 0;
+    overflow: hidden;
+}}
+.bottom-bar-btn:active {{
+    background: rgba(100, 160, 220, 0.18);
+}}
+.bottom-bar-btn + .bottom-bar-btn {{
+    border-left: 1.5px solid rgba(100, 160, 220, 0.4);
+}}
+.bottom-bar-btn.wide {{
+    flex: 1.7 1 0;
+}}
+.bottom-bar-btn.narrow {{
+    flex: 0.75 1 0;
+}}
+@media (max-width: 768px) {{
+    .fairies-bottom-bar {{ display: flex !important; }}
+    /* 下部バー分の余白をコンテンツ最下部に確保 */
+    .main .block-container {{
+        padding-bottom: 72px !important;
+    }}
+    /* PC版ボタングループをスマホで非表示
+       visibility:hidden にすることで DOM に残し、JS の clickNative() が動作する */
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-chat) + [data-testid="stHorizontalBlock"],
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-chat) + [data-testid="stColumns"],
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-post) ~ [data-testid="stMarkdownContainer"]:has(> hr),
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-post) ~ [data-testid="stHorizontalBlock"],
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-post) ~ [data-testid="stColumns"] {{
+        visibility: hidden !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }}
+
+}}
+</style>
+""", unsafe_allow_html=True)
 
 
 def ensure_log_dirs():
@@ -305,8 +893,44 @@ def show_consent_declined_screen():
         st.rerun()
 
 
+def show_survey_screen():
+    st.markdown(
+        '<div style="text-align:center; padding: 32px 0 16px 0;">'
+        '<p style="font-size:22px; font-weight:700; color:#fff; text-shadow:0 2px 8px rgba(0,0,0,0.4);">'
+        'ご利用ありがとうございました</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="result-card">'
+        '<p style="margin-bottom:8px;">今後の改善のため、1〜2分ほどのアンケートにご協力ください。</p>'
+        '<p style="color:#555; font-size:13px; margin-bottom:12px;">回答は開発・検証目的でのみ使用します。</p>'
+        f'<p style="font-size:12px; color:#888; margin:0;">うまく開かない場合は'
+        f'<a href="{GOOGLE_FORM_URL}" target="_blank" rel="noopener noreferrer">'
+        f'こちら</a>からどうぞ。</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if st.button("アンケートに回答する", key="open_survey", use_container_width=True):
+        # 新しいタブでGoogleフォームを開く（rerun前に描画されるため実行される）
+        components.html(
+            f"""<script>window.open({json.dumps(GOOGLE_FORM_URL)}, '_blank', 'noopener,noreferrer');</script>""",
+            height=0,
+        )
+        for key in ["show_survey_screen", "consent_status", "log_consent", "consented_at"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if st.button("回答せずに終了する", key="skip_survey", use_container_width=True):
+        for key in ["show_survey_screen", "consent_status", "log_consent", "consented_at"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+
 def _reset_chat_state():
     st.session_state.is_processing = False
+    st.session_state.analyze_insufficient_msg = None
     st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
     st.session_state.analysis_result = None
     st.session_state.match_result = None
@@ -345,19 +969,22 @@ def handle_finish():
         "level": "INFO",
         "message": "ユーザーが終わるボタンを押してセッションを終了しました",
     })
+    # ログ保存は必ず先に実行
     save_session_markdown_log(session_status="completed", end_reason="user_clicked_finish")
 
+    # チャット・分析・マッチング関連をリセット（consent_status は show_survey_screen 表示のために残す）
     for key in [
-        "consent_status", "log_consent", "consented_at",
         "session_id", "session_started_at", "session_log_path",
         "messages", "analysis_result", "match_result", "after_match_support",
         "top_match_candidates", "last_analysis_response", "last_analysis_error",
         "last_match_response", "last_match_error", "match_details_raw_response",
         "match_details_error", "selected_candidate_debug",
         "last_after_match_support_response", "last_after_match_support_error",
-        "last_reply_finish_reason",
+        "last_reply_finish_reason", "analyze_insufficient_msg", "is_processing",
     ]:
         st.session_state.pop(key, None)
+
+    st.session_state.show_survey_screen = True
     st.rerun()
 
 
@@ -375,6 +1002,25 @@ def handle_restart_after_analysis():
     _reset_chat_state()
     create_initial_session_log()
     st.rerun()
+
+
+def handle_analyze_request():
+    """分析開始の共通処理。PC版ボタンとスマホ下部バー（clickNative経由）の両方から呼ばれる。
+    会話数が不足している場合は session_state に案内メッセージを保存して終了する。
+    十分な場合は is_processing を立てて rerun する。
+    """
+    user_messages = [
+        m for m in st.session_state.messages
+        if m.get("role") == "user" and m.get("content", "").strip()
+    ]
+    if len(user_messages) < 3:
+        st.session_state.analyze_insufficient_msg = (
+            "もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。"
+        )
+    else:
+        st.session_state.analyze_insufficient_msg = None
+        st.session_state.is_processing = True
+        st.rerun()
 
 
 def load_candidates():
@@ -433,17 +1079,243 @@ def ensure_session_state():
         st.session_state.last_after_match_support_error = None
     if "last_reply_finish_reason" not in st.session_state:
         st.session_state.last_reply_finish_reason = None
+    if "analyze_insufficient_msg" not in st.session_state:
+        st.session_state.analyze_insufficient_msg = None
+    if "show_survey_screen" not in st.session_state:
+        st.session_state.show_survey_screen = False
 
 
 def render_chat():
-    for message in st.session_state.messages:
-        if message["role"] == "assistant":
-            with st.chat_message("assistant"):
-                st.write(message["content"])
-        else:
-            with st.chat_message("user"):
-                st.write(message["content"])
+    icon_b64 = get_image_base64("assets/fairies_ai_icon.png")
+    icon_src = f"data:image/png;base64,{icon_b64}" if icon_b64 else ""
 
+    rows = []
+    for msg in st.session_state.messages:
+        role = msg.get("role", "")
+        content = html_lib.escape(msg.get("content", "")).replace("\n", "<br>")
+        if role in ("assistant", "ai"):
+            icon_tag = (
+                f'<img src="{icon_src}" class="ai-icon" alt="Fairies AI">'
+                if icon_src
+                else '<div class="ai-icon" style="background:#c8def5;"></div>'
+            )
+            rows.append(
+                f'<div class="chat-row-ai">'
+                f'{icon_tag}'
+                f'<div class="bubble-ai">{content}</div>'
+                f'</div>'
+            )
+        elif role == "user":
+            rows.append(
+                f'<div class="chat-row-user">'
+                f'<div class="bubble-user">{content}</div>'
+                f'</div>'
+            )
+
+    st.markdown(
+        '<div class="chat-container">' + "\n".join(rows) + "</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_mobile_bottom_bar():
+    """スマホ下部固定バー。HTML div + position:fixed で画面下部に配置。
+    表示文言と内部クリック対象を分離し、分析後ボタンの誤クリックを防ぐ。
+    """
+    kb_b64 = get_image_base64("assets/fairies_ai_keyboard.png")
+    kb_src = f"data:image/png;base64,{kb_b64}" if kb_b64 else ""
+    kb_img = (
+        f'<img src="{kb_src}" alt="KB">'
+        if kb_src
+        else '<span style="font-size:22px;color:#1a3570;">&#9000;</span>'
+    )
+
+    is_post = bool(st.session_state.get("match_result"))
+
+    if is_post:
+        btn1_display = "最初から<br>やり直す"
+        btn1_target = "mobile_post_restart_trigger"
+        btn2_display = "終わる"
+        btn2_target = "mobile_post_finish_trigger"
+    else:
+        btn1_display = "分析して<br>マッチング"
+        btn1_target = "分析してマッチングする"
+        btn2_display = "やり直す"
+        btn2_target = "最初からやり直す"
+
+    bar_html = (
+        '<div class="fairies-bottom-bar">'
+        f'<div class="bottom-bar-kb fairies-bar-kb">{kb_img}</div>'
+        '<div class="bottom-bar-actions">'
+        f'<button class="bottom-bar-btn wide fairies-bar-btn1" type="button">{btn1_display}</button>'
+        f'<button class="bottom-bar-btn narrow fairies-bar-btn2" type="button">{btn2_display}</button>'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(bar_html, unsafe_allow_html=True)
+
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            var T1 = '{btn1_target}';
+            var T2 = '{btn2_target}';
+            var attempts = 0;
+            var debounceTimer = null;
+
+            function normalizeText(text) {{
+                return (text || '').replace(/\\s+/g, '').trim();
+            }}
+
+            function clickNative(label) {{
+                var p = window.parent.document;
+                var target = normalizeText(label);
+                var btns = p.querySelectorAll('[data-testid="stButton"] button, [data-testid="stFormSubmitButton"] button');
+
+                for (var i = 0; i < btns.length; i++) {{
+                    if (btns[i].closest('.fairies-bottom-bar')) {{
+                        continue;
+                    }}
+
+                    var btnText = normalizeText(btns[i].textContent);
+                    if (btnText === target) {{
+                        btns[i].click();
+                        return true;
+                    }}
+                }}
+
+                return false;
+            }}
+
+            // PC版ボタン列をスマホで非表示（DOMには残してclickNative()が動作できるようにする）
+            function hidePcBtns() {{
+                var p = window.parent.document;
+                if (window.parent.innerWidth > 768) return;
+                var pcLabels = ['分析してマッチングする', '最初からやり直す', '終わる'];
+                var blocks = p.querySelectorAll(
+                    '[data-testid="stHorizontalBlock"], [data-testid="stColumns"]'
+                );
+                for (var i = 0; i < blocks.length; i++) {{
+                    var block = blocks[i];
+                    var btns = block.querySelectorAll('button');
+                    var isPC = false;
+                    for (var j = 0; j < btns.length; j++) {{
+                        if (pcLabels.indexOf(btns[j].textContent.trim()) !== -1) {{
+                            isPC = true;
+                            break;
+                        }}
+                    }}
+                    if (isPC) {{
+                        block.style.visibility = 'hidden';
+                        block.style.height = '0';
+                        block.style.minHeight = '0';
+                        block.style.overflow = 'hidden';
+                        block.style.margin = '0';
+                        block.style.padding = '0';
+                    }}
+                }}
+
+                var mds = p.querySelectorAll('[data-testid="stMarkdownContainer"]');
+                for (var i = 0; i < mds.length; i++) {{
+                    var ch = mds[i].children;
+                    if (ch.length === 1 && ch[0].tagName === 'HR') {{
+                        mds[i].style.display = 'none';
+                    }}
+                }}
+            }}
+
+            // 分析後トリガーボタンを視覚的に非表示
+            function hideTriggerBtns() {{
+                var p = window.parent.document;
+                var labels = [
+                    'mobile_post_restart_trigger',
+                    'mobile_post_finish_trigger'
+                ];
+                var allBtns = p.querySelectorAll('[data-testid="stButton"] button');
+
+                for (var i = 0; i < allBtns.length; i++) {{
+                    if (labels.indexOf(allBtns[i].textContent.trim()) !== -1) {{
+                        var c = allBtns[i].closest('[data-testid="stButton"]');
+                        if (c) {{
+                            c.style.height = '0';
+                            c.style.minHeight = '0';
+                            c.style.overflow = 'hidden';
+                            c.style.margin = '0';
+                            c.style.padding = '0';
+                            c.style.opacity = '0';
+                            c.style.pointerEvents = 'none';
+                        }}
+                    }}
+                }}
+            }}
+
+            function bindBarButtons() {{
+                var p = window.parent.document;
+                var bar = p.querySelector('.fairies-bottom-bar');
+                if (!bar) return false;
+
+                var b1 = bar.querySelector('.fairies-bar-btn1');
+                var b2 = bar.querySelector('.fairies-bar-btn2');
+                var kb = bar.querySelector('.fairies-bar-kb');
+
+                if (b1) {{
+                    b1.onclick = function() {{
+                        clickNative(T1);
+                    }};
+                }}
+
+                if (b2) {{
+                    b2.onclick = function() {{
+                        clickNative(T2);
+                    }};
+                }}
+
+                if (kb) {{
+                    kb.onclick = function() {{
+                        var ta = p.querySelector('[data-testid="stTextArea"] textarea');
+                        if (ta) {{
+                            ta.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                            setTimeout(function() {{ ta.focus(); }}, 250);
+                        }}
+                    }};
+                }}
+
+                return true;
+            }}
+
+            function setup() {{
+                var p = window.parent.document;
+                var bar = p.querySelector('.fairies-bottom-bar');
+                if (!bar) {{
+                    if (attempts < 25) {{
+                        attempts++;
+                        setTimeout(setup, 200);
+                    }}
+                    return;
+                }}
+
+                hidePcBtns();
+                hideTriggerBtns();
+                bindBarButtons();
+
+                var observer = new MutationObserver(function() {{
+                    if (debounceTimer) clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(function() {{
+                        hidePcBtns();
+                        hideTriggerBtns();
+                        bindBarButtons();
+                    }}, 80);
+                }});
+
+                observer.observe(p.body, {{ childList: true, subtree: true }});
+            }}
+
+            setup();
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 def build_system_prompt() -> str:
     return (
@@ -1026,10 +1898,14 @@ def run_matching():
 
 
 def main():
-    st.set_page_config(page_title=f"AI分身マッチングMVP v{APP_VERSION}", layout="centered")
-    st.title(f"AI分身マッチングMVP v{APP_VERSION}")
-    st.write(
-        "AIとの対話を通じて、あなたの性格や価値観を分析し、相性のよさそうな候補者を1人紹介します。"
+    st.set_page_config(page_title=f"フェアリーズ ver{APP_VERSION}", layout="centered")
+    inject_custom_css()
+    st.markdown(
+        f'<div class="fairies-header">'
+        f'<h1>フェアリーズ</h1>'
+        f'<span class="ver-badge">ver{APP_VERSION}</span>'
+        f'</div>',
+        unsafe_allow_html=True,
     )
 
     if not OPENAI_API_KEY:
@@ -1038,6 +1914,11 @@ def main():
 
     ensure_session_state()
 
+    # 「終わる」押下後はアンケート案内画面を最優先表示（同意確認より前）
+    if st.session_state.get("show_survey_screen"):
+        show_survey_screen()
+        return
+
     if not has_log_consent():
         if st.session_state.consent_status == "declined":
             show_consent_declined_screen()
@@ -1045,11 +1926,21 @@ def main():
             show_consent_screen()
         return
 
+    render_mobile_bottom_bar()
     render_chat()
 
-    user_message = st.chat_input("メッセージを入力してください")
-    if user_message:
-        st.session_state.messages.append({"role": "user", "content": user_message})
+    with st.form(key="chat_form", clear_on_submit=True):
+        typed = st.text_area(
+            label="メッセージ入力",
+            placeholder="メッセージを入力してください",
+            label_visibility="collapsed",
+            height=68,
+        )
+        submitted = st.form_submit_button("送信")
+
+    if submitted and typed.strip():
+        st.session_state.analyze_insufficient_msg = None
+        st.session_state.messages.append({"role": "user", "content": typed})
         ai_reply = generate_ai_reply(st.session_state.messages)
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
         st.rerun()
@@ -1060,6 +1951,7 @@ def main():
             with st.spinner("分析中です... 少々お待ちください。"):
                 st.session_state.analysis_result = analyze_user(st.session_state.messages)
             if st.session_state.analysis_result is not None:
+                st.session_state.analyze_insufficient_msg = None
                 st.session_state.match_result = run_matching()
         except Exception as e:
             write_error_log("analysis_processing_exception", str(e))
@@ -1069,73 +1961,107 @@ def main():
     else:
         if st.session_state.get("last_analysis_error") and not st.session_state.analysis_result:
             st.error("分析結果を取得できませんでした。もう一度お試しください。")
+        # 会話数不足メッセージ：PC ボタンコンテナの外で表示するためスマホでも見える
+        if st.session_state.get("analyze_insufficient_msg"):
+            st.markdown(
+                '<div class="result-card" style="margin-bottom:8px;">'
+                '<p style="color:#1a3570;margin:0;">💬 '
+                + html_lib.escape(st.session_state.analyze_insufficient_msg)
+                + '</p></div>',
+                unsafe_allow_html=True,
+            )
+        # PC版ボタン（スマホではCSS+JSで非表示、DOMには残してclickNative()が動作）
+        st.markdown('<div class="pc-only-btns-chat"></div>', unsafe_allow_html=True)
         col1, col2 = st.columns([1, 1])
         with col1:
             if st.button("分析してマッチングする", key="analyze_and_match"):
-                user_messages = [
-                    m for m in st.session_state.messages
-                    if m.get("role") == "user" and m.get("content", "").strip()
-                ]
-                if len(user_messages) < 3:
-                    st.warning("もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。")
-                else:
-                    st.session_state.is_processing = True
-                    st.rerun()
+                handle_analyze_request()
         with col2:
             if st.button("最初からやり直す", key="restart_during_chat"):
                 handle_restart()
 
     if st.session_state.analysis_result:
-        st.markdown("---")
-        st.subheader("あなたの分析結果")
         analysis = st.session_state.analysis_result
-        st.markdown(f"**性格傾向:** {analysis.get('personality','-')}")
-        st.markdown(f"**大切にしている価値観:** {analysis.get('values','-')}")
-        st.markdown(f"**隠れた欲求:** {analysis.get('hidden_needs','-')}")
-        st.markdown(f"**会話スタイル:** {analysis.get('communication_style','-')}")
-        st.markdown(f"**相性が良い相手像:** {analysis.get('ideal_partner_type','-')}")
-        st.markdown(f"**一言要約:** {analysis.get('summary','-')}")
-        st.info("💡 この分析はあなたの会話内容に基づいています。より深い対話でより正確な分析が可能です。")
+        esc = lambda s: html_lib.escape(str(s or "-"))
+        st.markdown(
+            '<div class="result-card">'
+            '<div class="result-card-title">あなたの分析結果</div>'
+            f'<p><span class="result-label">性格傾向:</span> {esc(analysis.get("personality"))}</p>'
+            f'<p><span class="result-label">大切にしている価値観:</span> {esc(analysis.get("values"))}</p>'
+            f'<p><span class="result-label">隠れた欲求:</span> {esc(analysis.get("hidden_needs"))}</p>'
+            f'<p><span class="result-label">会話スタイル:</span> {esc(analysis.get("communication_style"))}</p>'
+            f'<p><span class="result-label">相性が良い相手像:</span> {esc(analysis.get("ideal_partner_type"))}</p>'
+            f'<p><span class="result-label">一言要約:</span> {esc(analysis.get("summary"))}</p>'
+            '<p class="result-note">💡 この分析はあなたの会話内容に基づいています。より深い対話でより正確な分析が可能です。</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     if st.session_state.match_result:
-        st.markdown("---")
-        st.subheader("マッチング結果")
         match = st.session_state.match_result
         candidate = match["matched_candidate"]
-        st.markdown(f"**名前:** {candidate.get('name','-')} ({candidate.get('age','-')}歳)")
-        st.markdown(f"**説明:** {candidate.get('description','-')}")
-        st.markdown(f"**相性タイプ:** {match.get('match_label','-')}")
-        st.success(f"**この候補者との相性ポイント:** {match.get('match_reason','-')}")
-        st.warning(f"**注意点:** {match.get('possible_concern','-')}")
-        st.info(f"**おすすめの最初のメッセージ:** {match.get('recommended_first_message','-')}")
+        esc = lambda s: html_lib.escape(str(s or "-"))
 
+        other_html = ""
         if st.session_state.top_match_candidates:
-            other_candidates = [item for item in st.session_state.top_match_candidates[1:3] if item.get('candidate')]
+            other_candidates = [
+                item for item in st.session_state.top_match_candidates[1:3]
+                if item.get("candidate")
+            ]
             if other_candidates:
-                st.markdown("---")
-                st.markdown("**他にも相性が近かった候補者:**")
-                analysis = st.session_state.analysis_result or {}
+                _analysis = st.session_state.analysis_result or {}
+                items_html = ""
                 for idx, item in enumerate(other_candidates, start=2):
-                    c = item['candidate']
-                    other_name = c.get('name', '未設定')
-                    reason = generate_short_candidate_reason(analysis, c)
-                    st.write(f"**{idx}位: {other_name}**")
-                    st.caption(reason)
+                    c = item["candidate"]
+                    items_html += (
+                        f'<p><span class="result-label">{idx}位: {esc(c.get("name","未設定"))}（{esc(str(c.get("age","?")))}歳）</span>'
+                        f'{esc(generate_short_candidate_reason(_analysis, c))}</p>'
+                    )
+                other_html = (
+                    '<div class="result-divider"></div>'
+                    '<p><span class="result-label">他にも相性が近かった候補者:</span></p>'
+                    + items_html
+                )
 
-        st.markdown("---")
-        st.caption("このマッチングはAIによる分析に基づいています。実際の相性は対話を通じて確かめてください。")
+        st.markdown(
+            '<div class="result-card">'
+            '<div class="result-card-title">マッチング結果</div>'
+            f'<p><span class="result-label">名前:</span> {esc(candidate.get("name"))}（{esc(str(candidate.get("age","?")))}歳）</p>'
+            f'<p><span class="result-label">説明:</span> {esc(candidate.get("description"))}</p>'
+            f'<p><span class="result-label">相性タイプ:</span> {esc(match.get("match_label"))}</p>'
+            f'<div class="result-success"><strong>相性ポイント:</strong> {esc(match.get("match_reason"))}</div>'
+            f'<div class="result-warning"><strong>注意点:</strong> {esc(match.get("possible_concern"))}</div>'
+            f'<div class="result-info"><strong>おすすめの最初のメッセージ:</strong> {esc(match.get("recommended_first_message"))}</div>'
+            + other_html
+            + '<p class="result-note">このマッチングはAIによる分析に基づいています。実際の相性は対話を通じて確かめてください。</p>'
+            '</div>',
+            unsafe_allow_html=True,
+        )
 
     if st.session_state.after_match_support:
-        st.markdown("---")
-        st.subheader("マッチ後支援")
         support = st.session_state.after_match_support
+        esc = lambda s: html_lib.escape(str(s or "-"))
 
-        render_support_field("今日送る一言", support.get('first_message_today', '-'))
-        render_support_field("3日以内に聞く質問", support.get('question_in_3days', '-'))
-        render_support_field("避けたほうがいい一言", support.get('avoid_phrase', '-'))
-        render_support_field("返信が遅いときの対応", support.get('slow_reply_action', '-'))
+        def _support_item(label, value):
+            if isinstance(value, list):
+                items = "".join(f"<li>{esc(i)}</li>" for i in value)
+                return f'<p class="result-label">{label}</p><ul>{items}</ul>'
+            return f'<p><span class="result-label">{label}:</span> {esc(str(value))}</p>'
+
+        st.markdown(
+            '<div class="result-card">'
+            '<div class="result-card-title">マッチ後支援</div>'
+            + _support_item("今日送る一言", support.get("first_message_today", "-"))
+            + _support_item("3日以内に聞く質問", support.get("question_in_3days", "-"))
+            + _support_item("避けたほうがいい一言", support.get("avoid_phrase", "-"))
+            + _support_item("返信が遅いときの対応", support.get("slow_reply_action", "-"))
+            + '</div>',
+            unsafe_allow_html=True,
+        )
 
     if st.session_state.match_result and not st.session_state.get("is_processing", False):
+        # PC版ボタン（スマホではCSS+JSで非表示、DOMには残してclickNative()が動作）
+        st.markdown('<div class="pc-only-btns-post"></div>', unsafe_allow_html=True)
         st.markdown("---")
         fin_col1, fin_col2 = st.columns(2)
         with fin_col1:
@@ -1144,7 +2070,17 @@ def main():
         with fin_col2:
             if st.button("終わる", key="finish_after_analysis_v003"):
                 handle_finish()
+        # スマホ下部バー用隠れトリガーボタン（分析後）
+        # clickNative() がこのラベルを検索して .click() する。
+        # CSS で height:0/overflow:hidden に折りたたんで視覚的に非表示。
+        st.markdown('<span class="mobile-post-triggers"></span>', unsafe_allow_html=True)
+        if st.button("mobile_post_restart_trigger", key="mobile_post_restart"):
+            handle_restart_after_analysis()
+        if st.button("mobile_post_finish_trigger", key="mobile_post_finish"):
+            handle_finish()
 
+    # デバッグ情報（開発用）
+    # PCでは折りたたみ表示、スマホではJSで非表示にする
     with st.expander("デバッグ情報（開発用）", expanded=False):
         st.write("messages:", st.session_state.messages)
         st.write("last_analysis_response:", st.session_state.last_analysis_response)
@@ -1162,6 +2098,74 @@ def main():
         st.write("last_reply_finish_reason:", st.session_state.last_reply_finish_reason)
         st.write("top_match_candidates:", st.session_state.top_match_candidates)
 
+    components.html(
+        """
+        <script>
+        (function() {
+            function hideDebugExpander() {
+                var p = window.parent.document;
 
+                // PC幅では表示したままにする
+                if (window.parent.innerWidth > 768) {
+                    return;
+                }
+
+                var targetText = 'デバッグ情報（開発用）';
+
+                // Streamlit の expander は環境によって details だったり data-testid が変わるため複数候補を見る
+                var candidates = p.querySelectorAll('details, [data-testid="stExpander"]');
+
+                for (var i = 0; i < candidates.length; i++) {
+                    var el = candidates[i];
+                    if ((el.textContent || '').indexOf(targetText) !== -1) {
+                        el.style.display = 'none';
+                        el.style.height = '0';
+                        el.style.minHeight = '0';
+                        el.style.overflow = 'hidden';
+                        el.style.margin = '0';
+                        el.style.padding = '0';
+                    }
+                }
+
+                // details / stExpander で見つからない場合の保険：
+                // 見出しテキストを持つ要素から近いコンテナを折りたたむ
+                var all = p.querySelectorAll('summary, button, [role="button"], [data-testid="stMarkdownContainer"]');
+
+                for (var j = 0; j < all.length; j++) {
+                    var node = all[j];
+                    if ((node.textContent || '').indexOf(targetText) !== -1) {
+                        var container =
+                            node.closest('details') ||
+                            node.closest('[data-testid="stExpander"]') ||
+                            node.closest('[data-testid="stElementContainer"]');
+
+                        if (container) {
+                            container.style.display = 'none';
+                            container.style.height = '0';
+                            container.style.minHeight = '0';
+                            container.style.overflow = 'hidden';
+                            container.style.margin = '0';
+                            container.style.padding = '0';
+                        }
+                    }
+                }
+            }
+
+            hideDebugExpander();
+
+            var p = window.parent.document;
+            var timer = null;
+            var observer = new MutationObserver(function() {
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(hideDebugExpander, 100);
+            });
+
+            observer.observe(p.body, { childList: true, subtree: true });
+        })();
+        </script>
+        """,
+        height=0,
+    )
+    
 if __name__ == "__main__":
     main()

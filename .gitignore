@@ -10,3 +10,4 @@ venv/
 .streamlit/secrets.toml
 logs/
 .claude/settings.local.json
+streamlit_test.log
