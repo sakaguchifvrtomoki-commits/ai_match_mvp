@@ -1296,32 +1296,99 @@ def render_mobile_bottom_bar():
                 return true;
             }}
 
-            function setup() {{
+            function hideStreamlitFloatingUi() {
+                var p = window.parent.document;
+
+                // Streamlit Cloud の右下固定UIを候補として広めに探す
+                var candidates = p.querySelectorAll(
+                    'a, button, div, iframe, section'
+                );
+
+                for (var i = 0; i < candidates.length; i++) {
+                    var el = candidates[i];
+                    var style = window.parent.getComputedStyle(el);
+
+                    // fixed / sticky 以外は対象外
+                    if (style.position !== 'fixed' && style.position !== 'sticky') {
+                        continue;
+                    }
+
+                    var rect = el.getBoundingClientRect();
+                    var vw = window.parent.innerWidth;
+                    var vh = window.parent.innerHeight;
+
+                    // 右下付近にある要素だけを見る
+                    var isBottomRight =
+                        rect.right > vw - 180 &&
+                        rect.bottom > vh - 140;
+
+                    if (!isBottomRight) {
+                        continue;
+                    }
+
+                    // フェアリーズの下部バー自体は消さない
+                    if (el.closest && el.closest('.fairies-bottom-bar')) {
+                        continue;
+                    }
+
+                    var text = (el.textContent || '').toLowerCase();
+                    var aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                    var title = (el.getAttribute('title') || '').toLowerCase();
+                    var html = (el.innerHTML || '').toLowerCase();
+
+                    var looksLikeStreamlit =
+                        text.indexOf('streamlit') !== -1 ||
+                        text.indexOf('fork') !== -1 ||
+                        aria.indexOf('streamlit') !== -1 ||
+                        title.indexOf('streamlit') !== -1 ||
+                        html.indexOf('streamlit') !== -1 ||
+                        html.indexOf('github') !== -1 ||
+                        html.indexOf('fork') !== -1;
+
+                    // 右下の大きめ固定ボタンも消す
+                    var looksLikeFloatingButton =
+                        rect.width >= 40 &&
+                        rect.height >= 40 &&
+                        rect.width <= 180 &&
+                        rect.height <= 120;
+
+                    if (looksLikeStreamlit || looksLikeFloatingButton) {
+                        el.style.display = 'none';
+                        el.style.visibility = 'hidden';
+                        el.style.pointerEvents = 'none';
+                        el.style.opacity = '0';
+                    }
+                }
+            }
+
+            function setup() {
                 var p = window.parent.document;
                 var bar = p.querySelector('.fairies-bottom-bar');
-                if (!bar) {{
-                    if (attempts < 25) {{
+                if (!bar) {
+                    if (attempts < 25) {
                         attempts++;
                         setTimeout(setup, 200);
-                    }}
+                    }
                     return;
-                }}
+                }
 
                 hidePcBtns();
                 hideTriggerBtns();
+                hideStreamlitFloatingUi();
                 bindBarButtons();
 
-                var observer = new MutationObserver(function() {{
+                var observer = new MutationObserver(function() {
                     if (debounceTimer) clearTimeout(debounceTimer);
-                    debounceTimer = setTimeout(function() {{
+                    debounceTimer = setTimeout(function() {
                         hidePcBtns();
                         hideTriggerBtns();
+                        hideStreamlitFloatingUi();
                         bindBarButtons();
-                    }}, 80);
-                }});
+                    }, 80);
+                });
 
-                observer.observe(p.body, {{ childList: true, subtree: true }});
-            }}
+                observer.observe(p.body, { childList: true, subtree: true });
+            }
 
             setup();
         }})();
