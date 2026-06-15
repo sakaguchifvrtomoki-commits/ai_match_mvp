@@ -519,7 +519,7 @@ html, body {{
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
     border-top: 1.5px solid rgba(100, 160, 220, 0.45);
-    z-index: 9999;
+    z-index: 2147483647 !important;
     flex-direction: row;
     align-items: stretch;
     box-shadow: 0 -3px 14px rgba(0,0,0,0.18);
@@ -608,6 +608,19 @@ html, body {{
         padding: 0 !important;
     }}
 
+}}
+/* ===== Streamlit Cloud 標準UIの非表示 ===== */
+#MainMenu,
+footer,
+header,
+.stDeployButton,
+[data-testid="stToolbar"],
+[data-testid="stDecoration"],
+[data-testid="stStatusWidget"],
+[data-testid="stHeader"] {{
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
 }}
 </style>
 """, unsafe_allow_html=True)
