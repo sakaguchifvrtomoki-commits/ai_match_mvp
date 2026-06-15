@@ -9,4 +9,4 @@ venv/
 .venv/
 .streamlit/secrets.toml
 logs/
-.claude/settings.local.json
+.claude/settings.local.jsonstreamlit_test.log

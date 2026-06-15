@@ -9,12 +9,15 @@ import uuid
 from pathlib import Path
 
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()
 
 APP_VERSION = "0.0.4"
+
+GOOGLE_FORM_URL = "https://docs.google.com/forms/d/1DckZthofdyKi4dK1f7XgmFrwxiV7Im_5RTieg5Kz7Fs/viewform"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
@@ -73,7 +76,7 @@ header[data-testid="stHeader"] {{
     display: none !important;
 }}
 
-/* ===== Fairiesタイトル ===== */
+/* ===== フェアリーズタイトル ===== */
 .fairies-header {{
     text-align: center;
     padding: 10px 0 16px 0;
@@ -179,12 +182,78 @@ header[data-testid="stHeader"] {{
     display: none !important;
 }}
 
-/* ===== チャット入力欄 ===== */
-[data-testid="stChatInput"] textarea {{
+/* ===== チャット入力フォーム（st.form方式） ===== */
+
+/* フォーム枠・背景を消す */
+[data-testid="stForm"] {{
+    border: none !important;
+    padding: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}}
+
+/* stVerticalBlock を flex row で横並び1行に */
+[data-testid="stForm"] [data-testid="stVerticalBlock"] {{
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 8px !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}}
+
+/* 入力補助テキスト（Press Enter to submit form）を非表示 */
+[data-testid="InputInstructions"] {{
+    display: none !important;
+}}
+
+/* テキストエリアが残り幅を使う */
+[data-testid="stForm"] [data-testid="stTextArea"] {{
+    flex: 1 1 auto !important;
+    min-width: 0 !important;
+    margin-bottom: 0 !important;
+}}
+[data-testid="stForm"] [data-testid="stTextArea"] textarea {{
     border-radius: 20px !important;
     background: rgba(255,255,255,0.88) !important;
     border: 1px solid rgba(100,160,220,0.35) !important;
+    padding-left: 14px !important;
+    padding-right: 12px !important;
     font-size: 15px !important;
+    width: 100% !important;
+    min-width: 0 !important;
+    box-sizing: border-box !important;
+    resize: none !important;
+    line-height: 1.5 !important;
+}}
+
+/* 送信ボタンを固定幅・画像化 */
+[data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+    flex: 0 0 48px !important;
+    width: 48px !important;
+    min-width: 48px !important;
+    margin-bottom: 0 !important;
+}}
+[data-testid="stFormSubmitButton"] button {{
+    background-image: {btn_css};
+    background-size: 80% !important;
+    background-repeat: no-repeat !important;
+    background-position: center !important;
+    background-color: transparent !important;
+    border: none !important;
+    box-shadow: none !important;
+    width: 48px !important;
+    height: 48px !important;
+    min-height: 48px !important;
+    padding: 0 !important;
+    border-radius: 50% !important;
+    color: transparent !important;
+}}
+[data-testid="stFormSubmitButton"] button p,
+[data-testid="stFormSubmitButton"] button [data-testid="stMarkdownContainer"],
+[data-testid="stFormSubmitButton"] button svg {{
+    display: none !important;
 }}
 
 /* ===== 結果カード（白背景） ===== */
@@ -290,20 +359,255 @@ header[data-testid="stHeader"] {{
     text-shadow: none !important;
 }}
 
-/* ===== スマホ向け ===== */
-@media (max-width: 600px) {{
+/* ===== 横スクロール防止（全幅） ===== */
+html, body {{
+    overflow-x: hidden !important;
+    max-width: 100% !important;
+}}
+.stApp {{
+    overflow-x: hidden !important;
+}}
+* {{
+    box-sizing: border-box;
+}}
+
+/* ===== スマホ・タブレット対応（768px以下） ===== */
+@media (max-width: 768px) {{
+
+    /* Streamlit デフォルト余白を削減 */
+    .block-container,
+    .stMainBlockContainer {{
+        padding-left: 12px !important;
+        padding-right: 12px !important;
+        padding-top: 16px !important;
+        padding-bottom: 80px !important;
+        max-width: 100% !important;
+    }}
+
+    /* タイトル */
     .fairies-header h1 {{ font-size: 26px; }}
+    .fairies-header {{ padding: 8px 0 12px 0; }}
+
+    /* 吹き出し */
     .bubble-ai, .bubble-user {{
         font-size: 14px;
         max-width: 85%;
+        padding: 9px 12px;
     }}
-    .ai-icon {{ width: 34px; height: 34px; }}
-    [data-testid="stChatInputSubmitButton"],
-    [data-testid="stChatInputSubmitButton"] button {{
+    .chat-row-ai, .chat-row-user {{ gap: 6px; }}
+    .ai-icon {{ width: 36px; height: 36px; }}
+    .chat-container {{ gap: 10px; padding: 6px 2px; }}
+
+    /* 結果カード */
+    .result-card {{
+        padding: 14px 16px;
+        margin: 10px 0;
+        border-radius: 12px;
+    }}
+    .result-card p,
+    .result-card ul,
+    .result-card li {{
+        font-size: 13px;
+    }}
+    .result-card-title {{ font-size: 15px; }}
+    .result-success,
+    .result-warning,
+    .result-info {{
+        font-size: 13px;
+        padding: 7px 10px;
+    }}
+    .result-note {{ font-size: 12px; }}
+
+    /* チャット入力欄（768px以下） */
+    [data-testid="stForm"] [data-testid="stTextArea"] textarea {{
+        font-size: 14px !important;
+    }}
+    [data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+        flex: 0 0 44px !important;
+        width: 44px !important;
+        min-width: 44px !important;
+    }}
+    [data-testid="stFormSubmitButton"] button {{
+        width: 44px !important;
+        height: 44px !important;
+        min-height: 44px !important;
+    }}
+}}
+
+/* ===== スマホ専用（480px以下） ===== */
+@media (max-width: 480px) {{
+
+    /* さらに余白を削減 */
+    .block-container,
+    .stMainBlockContainer {{
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+        padding-top: 12px !important;
+    }}
+
+    /* タイトル */
+    .fairies-header h1 {{ font-size: 22px; letter-spacing: 0.02em; }}
+    .fairies-header .ver-badge {{ font-size: 10px; }}
+
+    /* 吹き出し */
+    .bubble-ai, .bubble-user {{
+        font-size: 13px;
+        max-width: 88%;
+        padding: 8px 10px;
+        line-height: 1.6;
+    }}
+    .ai-icon {{ width: 32px; height: 32px; }}
+
+    /* 結果カード */
+    .result-card {{
+        padding: 12px 13px;
+        border-radius: 10px;
+        margin: 8px 0;
+    }}
+    .result-card p,
+    .result-card ul,
+    .result-card li {{
+        font-size: 12px;
+    }}
+    .result-card-title {{ font-size: 14px; margin-bottom: 10px; }}
+    .result-success,
+    .result-warning,
+    .result-info {{
+        font-size: 12px;
+        padding: 6px 9px;
+    }}
+
+    /* チャット入力欄（480px以下） */
+    [data-testid="stForm"] [data-testid="stVerticalBlock"] {{
+        gap: 6px !important;
+    }}
+    [data-testid="stForm"] [data-testid="stTextArea"] textarea {{
+        font-size: 13px !important;
+        padding-left: 12px !important;
+    }}
+    [data-testid="stForm"] [data-testid="stFormSubmitButton"] {{
+        flex: 0 0 40px !important;
+        width: 40px !important;
+        min-width: 40px !important;
+    }}
+    [data-testid="stFormSubmitButton"] button {{
         width: 40px !important;
         height: 40px !important;
         min-height: 40px !important;
     }}
+}}
+
+/* スマホ下部バー: 分析後の専用トリガーボタンを視覚的に非表示
+   height:0 + overflow:hidden で折りたたみ、DOM には残して JS の .click() が届く */
+[data-testid="stMarkdownContainer"]:has(.mobile-post-triggers) ~ [data-testid="stButton"] {{
+    height: 0 !important;
+    min-height: 0 !important;
+    overflow: hidden !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}}
+
+/* ===== スマホ下部固定バー ===== */
+.fairies-bottom-bar {{
+    display: none;
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: 56px;
+    background: rgba(255, 255, 255, 0.97);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-top: 1.5px solid rgba(100, 160, 220, 0.45);
+    z-index: 9999;
+    flex-direction: row;
+    align-items: stretch;
+    box-shadow: 0 -3px 14px rgba(0,0,0,0.18);
+    box-sizing: border-box;
+    overflow: hidden;
+}}
+.fairies-bottom-bar * {{
+    -webkit-text-stroke: 0 !important;
+    paint-order: normal !important;
+    text-shadow: none !important;
+    box-sizing: border-box;
+}}
+.bottom-bar-kb {{
+    flex: 0 0 54px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-right: 1.5px solid rgba(100, 160, 220, 0.4);
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+}}
+.bottom-bar-kb img {{
+    width: 26px;
+    height: 26px;
+    object-fit: contain;
+    opacity: 0.88;
+    pointer-events: none;
+}}
+.bottom-bar-actions {{
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: row;
+    align-items: stretch;
+    min-width: 0;
+}}
+.bottom-bar-btn {{
+    flex: 1 1 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #1a3570 !important;
+    font-size: 12px;
+    font-weight: 700;
+    cursor: pointer;
+    border: none;
+    background: transparent;
+    padding: 4px 2px;
+    text-align: center;
+    line-height: 1.3;
+    -webkit-tap-highlight-color: transparent;
+    user-select: none;
+    min-width: 0;
+    overflow: hidden;
+}}
+.bottom-bar-btn:active {{
+    background: rgba(100, 160, 220, 0.18);
+}}
+.bottom-bar-btn + .bottom-bar-btn {{
+    border-left: 1.5px solid rgba(100, 160, 220, 0.4);
+}}
+.bottom-bar-btn.wide {{
+    flex: 1.7 1 0;
+}}
+.bottom-bar-btn.narrow {{
+    flex: 0.75 1 0;
+}}
+@media (max-width: 768px) {{
+    .fairies-bottom-bar {{ display: flex !important; }}
+    /* 下部バー分の余白をコンテンツ最下部に確保 */
+    .main .block-container {{
+        padding-bottom: 72px !important;
+    }}
+    /* PC版ボタングループをスマホで非表示
+       visibility:hidden にすることで DOM に残し、JS の clickNative() が動作する */
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-chat) + [data-testid="stHorizontalBlock"],
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-chat) + [data-testid="stColumns"],
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-post) ~ [data-testid="stMarkdownContainer"]:has(> hr),
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-post) ~ [data-testid="stHorizontalBlock"],
+    [data-testid="stMarkdownContainer"]:has(.pc-only-btns-post) ~ [data-testid="stColumns"] {{
+        visibility: hidden !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        overflow: hidden !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }}
+
 }}
 </style>
 """, unsafe_allow_html=True)
@@ -589,8 +893,44 @@ def show_consent_declined_screen():
         st.rerun()
 
 
+def show_survey_screen():
+    st.markdown(
+        '<div style="text-align:center; padding: 32px 0 16px 0;">'
+        '<p style="font-size:22px; font-weight:700; color:#fff; text-shadow:0 2px 8px rgba(0,0,0,0.4);">'
+        'ご利用ありがとうございました</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+    st.markdown(
+        '<div class="result-card">'
+        '<p style="margin-bottom:8px;">今後の改善のため、1〜2分ほどのアンケートにご協力ください。</p>'
+        '<p style="color:#555; font-size:13px; margin-bottom:12px;">回答は開発・検証目的でのみ使用します。</p>'
+        f'<p style="font-size:12px; color:#888; margin:0;">うまく開かない場合は'
+        f'<a href="{GOOGLE_FORM_URL}" target="_blank" rel="noopener noreferrer">'
+        f'こちら</a>からどうぞ。</p>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+    if st.button("アンケートに回答する", key="open_survey", use_container_width=True):
+        # 新しいタブでGoogleフォームを開く（rerun前に描画されるため実行される）
+        components.html(
+            f"""<script>window.open({json.dumps(GOOGLE_FORM_URL)}, '_blank', 'noopener,noreferrer');</script>""",
+            height=0,
+        )
+        for key in ["show_survey_screen", "consent_status", "log_consent", "consented_at"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+    if st.button("回答せずに終了する", key="skip_survey", use_container_width=True):
+        for key in ["show_survey_screen", "consent_status", "log_consent", "consented_at"]:
+            st.session_state.pop(key, None)
+        st.rerun()
+
+
 def _reset_chat_state():
     st.session_state.is_processing = False
+    st.session_state.analyze_insufficient_msg = None
     st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
     st.session_state.analysis_result = None
     st.session_state.match_result = None
@@ -629,19 +969,22 @@ def handle_finish():
         "level": "INFO",
         "message": "ユーザーが終わるボタンを押してセッションを終了しました",
     })
+    # ログ保存は必ず先に実行
     save_session_markdown_log(session_status="completed", end_reason="user_clicked_finish")
 
+    # チャット・分析・マッチング関連をリセット（consent_status は show_survey_screen 表示のために残す）
     for key in [
-        "consent_status", "log_consent", "consented_at",
         "session_id", "session_started_at", "session_log_path",
         "messages", "analysis_result", "match_result", "after_match_support",
         "top_match_candidates", "last_analysis_response", "last_analysis_error",
         "last_match_response", "last_match_error", "match_details_raw_response",
         "match_details_error", "selected_candidate_debug",
         "last_after_match_support_response", "last_after_match_support_error",
-        "last_reply_finish_reason",
+        "last_reply_finish_reason", "analyze_insufficient_msg", "is_processing",
     ]:
         st.session_state.pop(key, None)
+
+    st.session_state.show_survey_screen = True
     st.rerun()
 
 
@@ -659,6 +1002,25 @@ def handle_restart_after_analysis():
     _reset_chat_state()
     create_initial_session_log()
     st.rerun()
+
+
+def handle_analyze_request():
+    """分析開始の共通処理。PC版ボタンとスマホ下部バー（clickNative経由）の両方から呼ばれる。
+    会話数が不足している場合は session_state に案内メッセージを保存して終了する。
+    十分な場合は is_processing を立てて rerun する。
+    """
+    user_messages = [
+        m for m in st.session_state.messages
+        if m.get("role") == "user" and m.get("content", "").strip()
+    ]
+    if len(user_messages) < 3:
+        st.session_state.analyze_insufficient_msg = (
+            "もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。"
+        )
+    else:
+        st.session_state.analyze_insufficient_msg = None
+        st.session_state.is_processing = True
+        st.rerun()
 
 
 def load_candidates():
@@ -717,6 +1079,10 @@ def ensure_session_state():
         st.session_state.last_after_match_support_error = None
     if "last_reply_finish_reason" not in st.session_state:
         st.session_state.last_reply_finish_reason = None
+    if "analyze_insufficient_msg" not in st.session_state:
+        st.session_state.analyze_insufficient_msg = None
+    if "show_survey_screen" not in st.session_state:
+        st.session_state.show_survey_screen = False
 
 
 def render_chat():
@@ -751,6 +1117,205 @@ def render_chat():
         unsafe_allow_html=True,
     )
 
+
+def render_mobile_bottom_bar():
+    """スマホ下部固定バー。HTML div + position:fixed で画面下部に配置。
+    表示文言と内部クリック対象を分離し、分析後ボタンの誤クリックを防ぐ。
+    """
+    kb_b64 = get_image_base64("assets/fairies_ai_keyboard.png")
+    kb_src = f"data:image/png;base64,{kb_b64}" if kb_b64 else ""
+    kb_img = (
+        f'<img src="{kb_src}" alt="KB">'
+        if kb_src
+        else '<span style="font-size:22px;color:#1a3570;">&#9000;</span>'
+    )
+
+    is_post = bool(st.session_state.get("match_result"))
+
+    if is_post:
+        btn1_display = "最初から<br>やり直す"
+        btn1_target = "mobile_post_restart_trigger"
+        btn2_display = "終わる"
+        btn2_target = "mobile_post_finish_trigger"
+    else:
+        btn1_display = "分析して<br>マッチング"
+        btn1_target = "分析してマッチングする"
+        btn2_display = "やり直す"
+        btn2_target = "最初からやり直す"
+
+    bar_html = (
+        '<div class="fairies-bottom-bar">'
+        f'<div class="bottom-bar-kb fairies-bar-kb">{kb_img}</div>'
+        '<div class="bottom-bar-actions">'
+        f'<button class="bottom-bar-btn wide fairies-bar-btn1" type="button">{btn1_display}</button>'
+        f'<button class="bottom-bar-btn narrow fairies-bar-btn2" type="button">{btn2_display}</button>'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(bar_html, unsafe_allow_html=True)
+
+    components.html(
+        f"""
+        <script>
+        (function() {{
+            var T1 = '{btn1_target}';
+            var T2 = '{btn2_target}';
+            var attempts = 0;
+            var debounceTimer = null;
+
+            function normalizeText(text) {{
+                return (text || '').replace(/\\s+/g, '').trim();
+            }}
+
+            function clickNative(label) {{
+                var p = window.parent.document;
+                var target = normalizeText(label);
+                var btns = p.querySelectorAll('[data-testid="stButton"] button, [data-testid="stFormSubmitButton"] button');
+
+                for (var i = 0; i < btns.length; i++) {{
+                    if (btns[i].closest('.fairies-bottom-bar')) {{
+                        continue;
+                    }}
+
+                    var btnText = normalizeText(btns[i].textContent);
+                    if (btnText === target) {{
+                        btns[i].click();
+                        return true;
+                    }}
+                }}
+
+                return false;
+            }}
+
+            // PC版ボタン列をスマホで非表示（DOMには残してclickNative()が動作できるようにする）
+            function hidePcBtns() {{
+                var p = window.parent.document;
+                if (window.parent.innerWidth > 768) return;
+                var pcLabels = ['分析してマッチングする', '最初からやり直す', '終わる'];
+                var blocks = p.querySelectorAll(
+                    '[data-testid="stHorizontalBlock"], [data-testid="stColumns"]'
+                );
+                for (var i = 0; i < blocks.length; i++) {{
+                    var block = blocks[i];
+                    var btns = block.querySelectorAll('button');
+                    var isPC = false;
+                    for (var j = 0; j < btns.length; j++) {{
+                        if (pcLabels.indexOf(btns[j].textContent.trim()) !== -1) {{
+                            isPC = true;
+                            break;
+                        }}
+                    }}
+                    if (isPC) {{
+                        block.style.visibility = 'hidden';
+                        block.style.height = '0';
+                        block.style.minHeight = '0';
+                        block.style.overflow = 'hidden';
+                        block.style.margin = '0';
+                        block.style.padding = '0';
+                    }}
+                }}
+
+                var mds = p.querySelectorAll('[data-testid="stMarkdownContainer"]');
+                for (var i = 0; i < mds.length; i++) {{
+                    var ch = mds[i].children;
+                    if (ch.length === 1 && ch[0].tagName === 'HR') {{
+                        mds[i].style.display = 'none';
+                    }}
+                }}
+            }}
+
+            // 分析後トリガーボタンを視覚的に非表示
+            function hideTriggerBtns() {{
+                var p = window.parent.document;
+                var labels = [
+                    'mobile_post_restart_trigger',
+                    'mobile_post_finish_trigger'
+                ];
+                var allBtns = p.querySelectorAll('[data-testid="stButton"] button');
+
+                for (var i = 0; i < allBtns.length; i++) {{
+                    if (labels.indexOf(allBtns[i].textContent.trim()) !== -1) {{
+                        var c = allBtns[i].closest('[data-testid="stButton"]');
+                        if (c) {{
+                            c.style.height = '0';
+                            c.style.minHeight = '0';
+                            c.style.overflow = 'hidden';
+                            c.style.margin = '0';
+                            c.style.padding = '0';
+                            c.style.opacity = '0';
+                            c.style.pointerEvents = 'none';
+                        }}
+                    }}
+                }}
+            }}
+
+            function bindBarButtons() {{
+                var p = window.parent.document;
+                var bar = p.querySelector('.fairies-bottom-bar');
+                if (!bar) return false;
+
+                var b1 = bar.querySelector('.fairies-bar-btn1');
+                var b2 = bar.querySelector('.fairies-bar-btn2');
+                var kb = bar.querySelector('.fairies-bar-kb');
+
+                if (b1) {{
+                    b1.onclick = function() {{
+                        clickNative(T1);
+                    }};
+                }}
+
+                if (b2) {{
+                    b2.onclick = function() {{
+                        clickNative(T2);
+                    }};
+                }}
+
+                if (kb) {{
+                    kb.onclick = function() {{
+                        var ta = p.querySelector('[data-testid="stTextArea"] textarea');
+                        if (ta) {{
+                            ta.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                            setTimeout(function() {{ ta.focus(); }}, 250);
+                        }}
+                    }};
+                }}
+
+                return true;
+            }}
+
+            function setup() {{
+                var p = window.parent.document;
+                var bar = p.querySelector('.fairies-bottom-bar');
+                if (!bar) {{
+                    if (attempts < 25) {{
+                        attempts++;
+                        setTimeout(setup, 200);
+                    }}
+                    return;
+                }}
+
+                hidePcBtns();
+                hideTriggerBtns();
+                bindBarButtons();
+
+                var observer = new MutationObserver(function() {{
+                    if (debounceTimer) clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(function() {{
+                        hidePcBtns();
+                        hideTriggerBtns();
+                        bindBarButtons();
+                    }}, 80);
+                }});
+
+                observer.observe(p.body, {{ childList: true, subtree: true }});
+            }}
+
+            setup();
+        }})();
+        </script>
+        """,
+        height=0,
+    )
 
 def build_system_prompt() -> str:
     return (
@@ -1333,11 +1898,11 @@ def run_matching():
 
 
 def main():
-    st.set_page_config(page_title=f"Fairies ver{APP_VERSION}", layout="centered")
+    st.set_page_config(page_title=f"フェアリーズ ver{APP_VERSION}", layout="centered")
     inject_custom_css()
     st.markdown(
         f'<div class="fairies-header">'
-        f'<h1>Fairies</h1>'
+        f'<h1>フェアリーズ</h1>'
         f'<span class="ver-badge">ver{APP_VERSION}</span>'
         f'</div>',
         unsafe_allow_html=True,
@@ -1349,6 +1914,11 @@ def main():
 
     ensure_session_state()
 
+    # 「終わる」押下後はアンケート案内画面を最優先表示（同意確認より前）
+    if st.session_state.get("show_survey_screen"):
+        show_survey_screen()
+        return
+
     if not has_log_consent():
         if st.session_state.consent_status == "declined":
             show_consent_declined_screen()
@@ -1356,11 +1926,21 @@ def main():
             show_consent_screen()
         return
 
+    render_mobile_bottom_bar()
     render_chat()
 
-    user_message = st.chat_input("メッセージを入力してください")
-    if user_message:
-        st.session_state.messages.append({"role": "user", "content": user_message})
+    with st.form(key="chat_form", clear_on_submit=True):
+        typed = st.text_area(
+            label="メッセージ入力",
+            placeholder="メッセージを入力してください",
+            label_visibility="collapsed",
+            height=68,
+        )
+        submitted = st.form_submit_button("送信")
+
+    if submitted and typed.strip():
+        st.session_state.analyze_insufficient_msg = None
+        st.session_state.messages.append({"role": "user", "content": typed})
         ai_reply = generate_ai_reply(st.session_state.messages)
         st.session_state.messages.append({"role": "assistant", "content": ai_reply})
         st.rerun()
@@ -1371,6 +1951,7 @@ def main():
             with st.spinner("分析中です... 少々お待ちください。"):
                 st.session_state.analysis_result = analyze_user(st.session_state.messages)
             if st.session_state.analysis_result is not None:
+                st.session_state.analyze_insufficient_msg = None
                 st.session_state.match_result = run_matching()
         except Exception as e:
             write_error_log("analysis_processing_exception", str(e))
@@ -1380,18 +1961,21 @@ def main():
     else:
         if st.session_state.get("last_analysis_error") and not st.session_state.analysis_result:
             st.error("分析結果を取得できませんでした。もう一度お試しください。")
+        # 会話数不足メッセージ：PC ボタンコンテナの外で表示するためスマホでも見える
+        if st.session_state.get("analyze_insufficient_msg"):
+            st.markdown(
+                '<div class="result-card" style="margin-bottom:8px;">'
+                '<p style="color:#1a3570;margin:0;">💬 '
+                + html_lib.escape(st.session_state.analyze_insufficient_msg)
+                + '</p></div>',
+                unsafe_allow_html=True,
+            )
+        # PC版ボタン（スマホではCSS+JSで非表示、DOMには残してclickNative()が動作）
+        st.markdown('<div class="pc-only-btns-chat"></div>', unsafe_allow_html=True)
         col1, col2 = st.columns([1, 1])
         with col1:
             if st.button("分析してマッチングする", key="analyze_and_match"):
-                user_messages = [
-                    m for m in st.session_state.messages
-                    if m.get("role") == "user" and m.get("content", "").strip()
-                ]
-                if len(user_messages) < 3:
-                    st.warning("もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。")
-                else:
-                    st.session_state.is_processing = True
-                    st.rerun()
+                handle_analyze_request()
         with col2:
             if st.button("最初からやり直す", key="restart_during_chat"):
                 handle_restart()
@@ -1476,6 +2060,8 @@ def main():
         )
 
     if st.session_state.match_result and not st.session_state.get("is_processing", False):
+        # PC版ボタン（スマホではCSS+JSで非表示、DOMには残してclickNative()が動作）
+        st.markdown('<div class="pc-only-btns-post"></div>', unsafe_allow_html=True)
         st.markdown("---")
         fin_col1, fin_col2 = st.columns(2)
         with fin_col1:
@@ -1484,7 +2070,17 @@ def main():
         with fin_col2:
             if st.button("終わる", key="finish_after_analysis_v003"):
                 handle_finish()
+        # スマホ下部バー用隠れトリガーボタン（分析後）
+        # clickNative() がこのラベルを検索して .click() する。
+        # CSS で height:0/overflow:hidden に折りたたんで視覚的に非表示。
+        st.markdown('<span class="mobile-post-triggers"></span>', unsafe_allow_html=True)
+        if st.button("mobile_post_restart_trigger", key="mobile_post_restart"):
+            handle_restart_after_analysis()
+        if st.button("mobile_post_finish_trigger", key="mobile_post_finish"):
+            handle_finish()
 
+    # デバッグ情報（開発用）
+    # PCでは折りたたみ表示、スマホではJSで非表示にする
     with st.expander("デバッグ情報（開発用）", expanded=False):
         st.write("messages:", st.session_state.messages)
         st.write("last_analysis_response:", st.session_state.last_analysis_response)
@@ -1502,6 +2098,74 @@ def main():
         st.write("last_reply_finish_reason:", st.session_state.last_reply_finish_reason)
         st.write("top_match_candidates:", st.session_state.top_match_candidates)
 
+    components.html(
+        """
+        <script>
+        (function() {
+            function hideDebugExpander() {
+                var p = window.parent.document;
 
+                // PC幅では表示したままにする
+                if (window.parent.innerWidth > 768) {
+                    return;
+                }
+
+                var targetText = 'デバッグ情報（開発用）';
+
+                // Streamlit の expander は環境によって details だったり data-testid が変わるため複数候補を見る
+                var candidates = p.querySelectorAll('details, [data-testid="stExpander"]');
+
+                for (var i = 0; i < candidates.length; i++) {
+                    var el = candidates[i];
+                    if ((el.textContent || '').indexOf(targetText) !== -1) {
+                        el.style.display = 'none';
+                        el.style.height = '0';
+                        el.style.minHeight = '0';
+                        el.style.overflow = 'hidden';
+                        el.style.margin = '0';
+                        el.style.padding = '0';
+                    }
+                }
+
+                // details / stExpander で見つからない場合の保険：
+                // 見出しテキストを持つ要素から近いコンテナを折りたたむ
+                var all = p.querySelectorAll('summary, button, [role="button"], [data-testid="stMarkdownContainer"]');
+
+                for (var j = 0; j < all.length; j++) {
+                    var node = all[j];
+                    if ((node.textContent || '').indexOf(targetText) !== -1) {
+                        var container =
+                            node.closest('details') ||
+                            node.closest('[data-testid="stExpander"]') ||
+                            node.closest('[data-testid="stElementContainer"]');
+
+                        if (container) {
+                            container.style.display = 'none';
+                            container.style.height = '0';
+                            container.style.minHeight = '0';
+                            container.style.overflow = 'hidden';
+                            container.style.margin = '0';
+                            container.style.padding = '0';
+                        }
+                    }
+                }
+            }
+
+            hideDebugExpander();
+
+            var p = window.parent.document;
+            var timer = null;
+            var observer = new MutationObserver(function() {
+                if (timer) clearTimeout(timer);
+                timer = setTimeout(hideDebugExpander, 100);
+            });
+
+            observer.observe(p.body, { childList: true, subtree: true });
+        })();
+        </script>
+        """,
+        height=0,
+    )
+    
 if __name__ == "__main__":
     main()
