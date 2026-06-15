@@ -497,7 +497,7 @@ html, body {{
     }}
         /* Streamlit Cloud 右下ロゴと重ならないように下部バーの右端を空ける */
     .fairies-bottom-bar {{
-        padding-right: 100px !important;
+        padding-right: 120px !important;
     }}
 
     .bottom-bar-btn {{
