@@ -11,17 +11,21 @@ from pathlib import Path
 import streamlit as st
 import streamlit.components.v1 as components
 from dotenv import load_dotenv
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaFileUpload
 from openai import OpenAI
 
 load_dotenv()
 
 APP_VERSION = "0.0.4"
 
-GOOGLE_FORM_URL = "https://docs.google.com/forms/d/1DckZthofdyKi4dK1f7XgmFrwxiV7Im_5RTieg5Kz7Fs/viewform"
+GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeEl3FGWUk_-B7CtGLBOq1YNeeRNcClNibd-8ikF_Weh6rE9A/viewform"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+GOOGLE_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 
 
 def get_openai_client():
@@ -693,6 +697,126 @@ def write_error_log(event: str, error_message: str, data=None):
     except Exception:
         st.warning("エラーログの書き込みに失敗しました（アプリの動作には影響しません）。")
 
+def get_google_drive_service():
+    """Streamlit Secrets のサービスアカウント情報から Google Drive API クライアントを作る。"""
+    try:
+        if "gcp_service_account" not in st.secrets:
+            return None
+
+        service_account_info = dict(st.secrets["gcp_service_account"])
+
+        # Streamlit Secrets上で private_key の改行が \n 文字列になっている場合に備える
+        if "private_key" in service_account_info:
+            service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
+
+        credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=GOOGLE_DRIVE_SCOPES,
+        )
+        return build("drive", "v3", credentials=credentials)
+
+    except Exception as e:
+        st.session_state.last_drive_upload_error = f"Google Drive認証に失敗しました: {e}"
+        write_error_log("google_drive_auth_failed", str(e))
+        return None
+
+
+def _escape_drive_query_text(text: str) -> str:
+    """Google Drive API の query 用にファイル名を簡易エスケープする。"""
+    return str(text).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def upload_file_to_google_drive(local_path):
+    """指定されたローカルファイルをGoogle Driveの指定フォルダへアップロードする。
+
+    同名ファイルがDriveフォルダ内にある場合は更新し、なければ新規作成する。
+    失敗してもアプリ本体は止めない。
+    """
+    try:
+        folder_id = st.secrets.get("GOOGLE_DRIVE_FOLDER_ID", "")
+        if not folder_id:
+            st.session_state.last_drive_upload_error = "GOOGLE_DRIVE_FOLDER_ID が設定されていません。"
+            write_error_log("google_drive_folder_id_missing", "GOOGLE_DRIVE_FOLDER_ID is missing")
+            return None
+
+        local_path = Path(local_path)
+        if not local_path.exists():
+            st.session_state.last_drive_upload_error = f"アップロード対象ファイルが存在しません: {local_path}"
+            write_error_log("google_drive_upload_file_missing", str(local_path))
+            return None
+
+        service = get_google_drive_service()
+        if service is None:
+            return None
+
+        filename = local_path.name
+        escaped_name = _escape_drive_query_text(filename)
+
+        query = (
+            f"name = '{escaped_name}' "
+            f"and '{folder_id}' in parents "
+            f"and trashed = false"
+        )
+
+        existing = service.files().list(
+            q=query,
+            spaces="drive",
+            fields="files(id, name, webViewLink)",
+            pageSize=1,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+
+        media = MediaFileUpload(
+            str(local_path),
+            mimetype="text/markdown",
+            resumable=False,
+        )
+
+        files = existing.get("files", [])
+        if files:
+            file_id = files[0]["id"]
+            result = service.files().update(
+                fileId=file_id,
+                media_body=media,
+                fields="id, name, webViewLink",
+                supportsAllDrives=True,
+            ).execute()
+            action = "updated"
+        else:
+            metadata = {
+                "name": filename,
+                "parents": [folder_id],
+                "mimeType": "text/markdown",
+            }
+            result = service.files().create(
+                body=metadata,
+                media_body=media,
+                fields="id, name, webViewLink",
+                supportsAllDrives=True,
+            ).execute()
+            action = "created"
+
+        st.session_state.last_drive_upload_response = result
+        st.session_state.last_drive_upload_error = None
+
+        write_debug_log("google_drive_upload_finished", {
+            "level": "INFO",
+            "message": "Google Driveへのログアップロードが完了しました",
+            "action": action,
+            "file_name": result.get("name"),
+            "file_id": result.get("id"),
+            "webViewLink": result.get("webViewLink"),
+        })
+
+        return result
+
+    except Exception as e:
+        st.session_state.last_drive_upload_error = str(e)
+        write_error_log("google_drive_upload_failed", str(e), {
+            "local_path": str(local_path),
+        })
+        return None
 
 def save_session_markdown_log(session_status: str = "completed", end_reason: str = None):
     try:
@@ -778,7 +902,13 @@ def save_session_markdown_log(session_status: str = "completed", end_reason: str
             log_path = paths["sessions_dir"] / f"{session_id}.md"
         with open(log_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
-    except Exception:
+
+        # Streamlit Cloud上のファイルは永続保存として信用しにくいため、
+        # 同じMarkdownログをGoogle Driveにも保存する。
+        upload_file_to_google_drive(log_path)
+
+    except Exception as e:
+        write_error_log("session_markdown_save_failed", str(e))
         st.warning("セッションログの保存に失敗しました（アプリの動作には影響しません）。")
 
 
@@ -874,6 +1004,7 @@ def show_consent_screen():
         "- エラー情報"
     )
     st.write("保存されたログは開発・検証目的でのみ使用します。")
+    st.write("ログは、開発者が管理するGoogle Driveにも保存されます。")
     st.write("GitHubなどの公開場所には保存しません。")
     st.write("同意する場合のみ、チャットを開始できます。")
 
@@ -934,16 +1065,18 @@ def show_survey_screen():
         unsafe_allow_html=True,
     )
 
-    if st.button("アンケートに回答する", key="open_survey", use_container_width=True):
-        # 新しいタブでGoogleフォームを開く（rerun前に描画されるため実行される）
-        components.html(
-            f"""<script>window.open({json.dumps(GOOGLE_FORM_URL)}, '_blank', 'noopener,noreferrer');</script>""",
-            height=0,
-        )
+    st.link_button(
+        "アンケートに回答する",
+        GOOGLE_FORM_URL,
+        use_container_width=True,
+    )
+
+    st.caption("アンケート回答後、このページに戻って「回答後、終了する」を押してください。")
+
+    if st.button("回答後、終了する", key="finish_after_survey", use_container_width=True):
         for key in ["show_survey_screen", "consent_status", "log_consent", "consented_at"]:
             st.session_state.pop(key, None)
         st.rerun()
-
     if st.button("回答せずに終了する", key="skip_survey", use_container_width=True):
         for key in ["show_survey_screen", "consent_status", "log_consent", "consented_at"]:
             st.session_state.pop(key, None)
@@ -1103,6 +1236,10 @@ def ensure_session_state():
         st.session_state.last_reply_finish_reason = None
     if "analyze_insufficient_msg" not in st.session_state:
         st.session_state.analyze_insufficient_msg = None
+    if "last_drive_upload_response" not in st.session_state:
+        st.session_state.last_drive_upload_response = None
+    if "last_drive_upload_error" not in st.session_state:
+        st.session_state.last_drive_upload_error = None
     if "show_survey_screen" not in st.session_state:
         st.session_state.show_survey_screen = False
 
@@ -2119,6 +2256,10 @@ def main():
         st.write("last_after_match_support_error:", st.session_state.last_after_match_support_error)
         st.write("last_reply_finish_reason:", st.session_state.last_reply_finish_reason)
         st.write("top_match_candidates:", st.session_state.top_match_candidates)
+        st.write("---")
+        st.write("【Google Driveログ保存】")
+        st.write("last_drive_upload_response:", st.session_state.last_drive_upload_response)
+        st.write("last_drive_upload_error:", st.session_state.last_drive_upload_error)
 
     components.html(
         """
