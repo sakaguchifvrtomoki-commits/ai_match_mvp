@@ -2122,7 +2122,7 @@ def main():
     with st.form(key="chat_form", clear_on_submit=True):
         typed = st.text_area(
             label="メッセージ入力",
-            placeholder="メッセージを入力してください",
+            placeholder="メッセージを入力して、右の吹き出しで送信",
             label_visibility="collapsed",
             height=68,
         )
