@@ -105,18 +105,6 @@ header[data-testid="stHeader"] {{
 }}
 
 /* ===== チャット吹き出しコンテナ ===== */
-/* ===== チャット画面 3往復案内 ===== */
-.chat-guide-note {{
-    background: rgba(255,255,255,0.82);
-    border-left: 3px solid #7bafd4;
-    border-radius: 8px;
-    padding: 8px 14px;
-    font-size: 13px;
-    color: #1a3570;
-    margin-bottom: 8px;
-    line-height: 1.55;
-}}
-
 .chat-container {{
     display: flex;
     flex-direction: column;
@@ -1012,7 +1000,6 @@ def record_consent_event(accepted: bool):
 
 
 def show_consent_screen():
-    st.write("このアプリはAIとチャットすることであなたの性格や価値観を分析し、それをもとに一人の人物（架空）とマッチングするアプリです。")
     st.subheader("ログ保存への同意確認")
     st.write("このアプリでは、品質改善・動作確認のため、以下の情報を保存します。")
     st.markdown(
@@ -1191,11 +1178,11 @@ def handle_analyze_request():
         st.session_state.analyze_insufficient_msg = (
             "もう少し会話してから分析すると、より自然なマッチングになります。目安は3往復以上です。"
         )
+        st.rerun()
     else:
         st.session_state.analyze_insufficient_msg = None
         st.session_state.is_processing = True
         st.rerun()
-
 
 def load_candidates():
     path = Path(__file__).parent / "candidates.json"
@@ -1290,12 +1277,6 @@ def render_chat():
                 f'</div>'
             )
 
-    st.markdown(
-        '<div class="chat-guide-note">'
-        'より自然な分析のため、まずはAIと3往復以上会話してから「分析してマッチング」を押してください。'
-        '</div>',
-        unsafe_allow_html=True,
-    )
     st.markdown(
         '<div class="chat-container">' + "\n".join(rows) + "</div>",
         unsafe_allow_html=True,
