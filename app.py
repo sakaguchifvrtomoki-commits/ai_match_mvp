@@ -1013,7 +1013,7 @@ def record_consent_event(accepted: bool):
 
 def show_consent_screen():
     st.markdown(
-        '<div class="result-card" style="margin-bottom:16px;">'
+        '<div class="result-card" style="margin-bottom:16px; background:rgba(255,255,255,0.55);">'
         'このアプリは、AIとチャットすることであなたの性格や価値観を分析し、'
         'それをもとに一人の人物（架空）とマッチングするアプリです。'
         '</div>',
