@@ -14,7 +14,6 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from dotenv import load_dotenv
-from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from openai import OpenAI
 
@@ -725,127 +724,6 @@ def get_google_drive_service():
     except Exception as e:
         st.session_state.last_drive_upload_error = f"Google Drive OAuth認証に失敗しました: {e}"
         write_error_log("google_drive_oauth_failed", str(e))
-        return None
-
-
-def _escape_drive_query_text(text: str) -> str:
-    """Google Drive API の query 用にファイル名を簡易エスケープする。"""
-    return str(text).replace("\\", "\\\\").replace("'", "\\'")
-
-
-def upload_file_to_google_drive(local_path):
-    """指定されたローカルファイルをGoogle Driveの指定フォルダへアップロードする。
-
-    同名ファイルがDriveフォルダ内にある場合は更新し、なければ新規作成する。
-    失敗してもアプリ本体は止めない。
-    """
-    try:
-        folder_id = st.secrets.get("GOOGLE_DRIVE_FOLDER_ID", "")
-        if not folder_id:
-            st.session_state.last_drive_upload_error = "GOOGLE_DRIVE_FOLDER_ID が設定されていません。"
-            write_error_log("google_drive_folder_id_missing", "GOOGLE_DRIVE_FOLDER_ID is missing")
-            return None
-
-        local_path = Path(local_path)
-        if not local_path.exists():
-            st.session_state.last_drive_upload_error = f"アップロード対象ファイルが存在しません: {local_path}"
-            write_error_log("google_drive_upload_file_missing", str(local_path))
-            return None
-
-        service = get_google_drive_service()
-        if service is None:
-            return None
-
-        filename = local_path.name
-        escaped_name = _escape_drive_query_text(filename)
-
-        query = (
-            f"name = '{escaped_name}' "
-            f"and '{folder_id}' in parents "
-            f"and trashed = false"
-        )
-
-        existing = service.files().list(
-            q=query,
-            spaces="drive",
-            fields="files(id, name, webViewLink)",
-            pageSize=1,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
-        ).execute()
-
-        media = MediaFileUpload(
-            str(local_path),
-            mimetype="text/markdown",
-            resumable=False,
-        )
-
-        files = existing.get("files", [])
-        if files:
-            file_id = files[0]["id"]
-            result = service.files().update(
-                fileId=file_id,
-                media_body=media,
-                fields="id, name, webViewLink",
-                supportsAllDrives=True,
-            ).execute()
-            action = "updated"
-        else:
-            metadata = {
-                "name": filename,
-                "parents": [folder_id],
-                "mimeType": "text/markdown",
-            }
-            result = service.files().create(
-                body=metadata,
-                media_body=media,
-                fields="id, name, webViewLink",
-                supportsAllDrives=True,
-            ).execute()
-            action = "created"
-
-        st.session_state.last_drive_upload_response = result
-        st.session_state.last_drive_upload_error = None
-
-        write_debug_log("google_drive_upload_finished", {
-            "level": "INFO",
-            "message": "Google Driveへのログアップロードが完了しました",
-            "action": action,
-            "file_name": result.get("name"),
-            "file_id": result.get("id"),
-            "webViewLink": result.get("webViewLink"),
-        })
-
-        return result
-
-    except Exception as e:
-        st.session_state.last_drive_upload_error = str(e)
-        write_error_log("google_drive_upload_failed", str(e), {
-            "local_path": str(local_path),
-        })
-        return None
-
-def get_google_drive_service():
-    """Streamlit Secrets のサービスアカウント情報から Google Drive API クライアントを作る。"""
-    try:
-        if "gcp_service_account" not in st.secrets:
-            return None
-
-        service_account_info = dict(st.secrets["gcp_service_account"])
-
-        # Streamlit Secrets上で private_key の改行が \n 文字列になっている場合に備える
-        if "private_key" in service_account_info:
-            service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-
-        credentials = service_account.Credentials.from_service_account_info(
-            service_account_info,
-            scopes=GOOGLE_DRIVE_SCOPES,
-        )
-        return build("drive", "v3", credentials=credentials)
-
-    except Exception as e:
-        st.session_state.last_drive_upload_error = f"Google Drive認証に失敗しました: {e}"
-        write_error_log("google_drive_auth_failed", str(e))
         return None
 
 
