@@ -14,3 +14,5 @@ streamlit_test.log
 oauth_client_secret.json
 token.json
 get_google_refresh_token.py
+user_profiles/
+old_app_v0.0.4.py

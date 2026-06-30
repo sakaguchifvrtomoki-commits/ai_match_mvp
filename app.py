@@ -6,6 +6,7 @@ import math
 import os
 import traceback
 import uuid
+from copy import deepcopy
 from pathlib import Path
 
 import streamlit as st
@@ -19,7 +20,8 @@ from openai import OpenAI
 
 load_dotenv()
 
-APP_VERSION = "0.0.4"
+APP_VERSION = "0.1.0"
+PROFILE_VERSION = "0.1.0"
 
 GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeEl3FGWUk_-B7CtGLBOq1YNeeRNcClNibd-8ikF_Weh6rE9A/viewform"
 
@@ -686,6 +688,9 @@ def write_debug_log(event: str, data=None):
             "session_id": get_or_create_session_id(),
             "event": event,
         }
+        uid = st.session_state.get("user_id")
+        if uid:
+            entry["user_id"] = uid
         if data is not None:
             entry["data"] = data
         with open(paths["debug_file"], "a", encoding="utf-8") as f:
@@ -710,31 +715,551 @@ def write_error_log(event: str, error_message: str, data=None):
     except Exception:
         st.warning("エラーログの書き込みに失敗しました（アプリの動作には影響しません）。")
 
-def get_google_drive_service():
-    """Streamlit Secrets のOAuth情報から Google Drive API クライアントを作る。"""
+def sanitize_user_id(user_id: str) -> str:
+    import re
+    return re.sub(r"[^a-zA-Z0-9_\-]", "_", str(user_id))[:64]
+
+
+def initialize_user_id() -> str:
+    params = st.query_params
+    if "user_id" in params:
+        uid = sanitize_user_id(params["user_id"])
+        st.session_state.user_id = uid
+        write_debug_log("user_id_initialized", {
+            "level": "INFO",
+            "message": "user_id was initialized from URL query parameter",
+            "user_id": uid,
+            "session_id": st.session_state.get("session_id", ""),
+        })
+        return uid
+
+    existing = st.session_state.get("user_id")
+    if existing:
+        write_debug_log("user_id_initialized", {
+            "level": "INFO",
+            "message": "user_id was reused from session state",
+            "user_id": existing,
+            "session_id": st.session_state.get("session_id", ""),
+        })
+        return existing
+
+    uid = f"user_{uuid.uuid4().hex[:12]}"
+    st.session_state.user_id = uid
+    write_debug_log("user_id_initialized", {
+        "level": "INFO",
+        "message": "user_id was generated automatically",
+        "user_id": uid,
+        "session_id": st.session_state.get("session_id", ""),
+    })
+    return uid
+
+
+def get_or_create_user_id() -> str:
+    return initialize_user_id()
+
+
+def get_user_profiles_dir() -> Path:
+    d = Path(__file__).parent / "user_profiles"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_user_profile_path(user_id: str) -> Path:
+    return get_user_profiles_dir() / f"{user_id}.json"
+
+
+def _empty_profile(user_id: str) -> dict:
+    return {
+        "user_id": user_id,
+        "profile_update_count": 0,
+        "first_created_at": "",
+        "updated_at": "",
+        "profile_version": PROFILE_VERSION,
+        "summary": {
+            "stable": "",
+            "recent": "",
+            "growth": "",
+            "tensions": [],
+        },
+        "personality_traits": {
+            "communication_style": "",
+            "decision_style": "",
+            "emotional_tendency": "",
+        },
+        "values": [],
+        "preferences": {
+            "relationship_style": "",
+            "conversation_topics": [],
+            "dislikes": [],
+        },
+        "matching_hypothesis": {
+            "stable_good_match": "",
+            "recent_good_match": "",
+            "likely_bad_match": "",
+            "reasoning_history": [],
+        },
+        "confidence": {
+            "summary": 0.0,
+            "values": 0.0,
+            "matching_hypothesis": 0.0,
+        },
+        "memory_notes": [],
+        "uncertainties": [],
+        "evidence": [],
+    }
+
+
+def load_user_profile(user_id: str) -> dict:
+    path = get_user_profile_path(user_id)
+    if not path.exists():
+        return _empty_profile(user_id)
     try:
-        if "google_oauth" not in st.secrets:
-            st.session_state.last_drive_upload_error = "google_oauth が Streamlit Secrets に設定されていません。"
-            write_error_log("google_drive_oauth_missing", "google_oauth is missing in Streamlit Secrets")
+        with open(path, encoding="utf-8") as f:
+            profile = json.load(f)
+        if not isinstance(profile, dict):
+            raise ValueError("プロフィールが辞書型ではありません")
+        profile["summary"] = normalize_summary(profile.get("summary", ""))
+        profile["matching_hypothesis"] = normalize_matching_hypothesis(profile.get("matching_hypothesis", {}))
+        return profile
+    except Exception as e:
+        try:
+            backup_path = path.with_suffix(
+                f".{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+            )
+            path.rename(backup_path)
+        except Exception:
+            pass
+        write_debug_log("user_profile_load_failed", {"user_id": user_id, "error": str(e)})
+        return _empty_profile(user_id)
+
+
+def save_user_profile(user_id: str, profile: dict) -> bool:
+    try:
+        path = get_user_profile_path(user_id)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        write_debug_log("user_profile_save_failed", {"user_id": user_id, "error": str(e)})
+        return False
+
+
+def get_user_profile_history_dir() -> Path:
+    d = get_user_profiles_dir() / "history"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_user_profile_history(user_id: str, profile: dict, session_id: str) -> bool:
+    try:
+        history_dir = get_user_profile_history_dir()
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{user_id}_{timestamp}_{session_id}.json"
+        path = history_dir / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        write_debug_log("user_profile_history_save_failed", {"user_id": user_id, "error": str(e)})
+        return False
+
+
+def _merge_profile_scalar(existing_value, new_value):
+    if new_value is None:
+        return existing_value
+    if isinstance(new_value, str) and not new_value.strip():
+        return existing_value
+    return new_value
+
+
+def _merge_profile_list(existing_list, new_list):
+    if not isinstance(existing_list, list):
+        existing_list = []
+    if not isinstance(new_list, list) or len(new_list) == 0:
+        return existing_list
+    merged = list(existing_list)
+    for item in new_list:
+        if item and item not in merged:
+            merged.append(item)
+    return merged
+
+
+def _merge_confidence(existing_value, new_value):
+    try:
+        existing_value = float(existing_value) if existing_value is not None else 0.0
+    except Exception:
+        existing_value = 0.0
+    try:
+        new_value = float(new_value) if new_value is not None else 0.0
+    except Exception:
+        new_value = 0.0
+    return max(existing_value, new_value)
+
+
+def normalize_summary(summary):
+    if isinstance(summary, dict):
+        return {
+            "stable": summary.get("stable", ""),
+            "recent": summary.get("recent", ""),
+            "growth": summary.get("growth", ""),
+            "tensions": summary.get("tensions", []) if isinstance(summary.get("tensions", []), list) else [],
+        }
+    if isinstance(summary, str):
+        return {"stable": summary, "recent": "", "growth": "", "tensions": []}
+    return {"stable": "", "recent": "", "growth": "", "tensions": []}
+
+
+def normalize_matching_hypothesis(mh):
+    if not isinstance(mh, dict):
+        return {
+            "stable_good_match": "",
+            "recent_good_match": "",
+            "likely_bad_match": "",
+            "reasoning_history": [],
+        }
+    if "stable_good_match" in mh or "recent_good_match" in mh or "reasoning_history" in mh:
+        return {
+            "stable_good_match": mh.get("stable_good_match", ""),
+            "recent_good_match": mh.get("recent_good_match", ""),
+            "likely_bad_match": mh.get("likely_bad_match", ""),
+            "reasoning_history": mh.get("reasoning_history", []) if isinstance(mh.get("reasoning_history", []), list) else [],
+        }
+    return {
+        "stable_good_match": mh.get("likely_good_match", ""),
+        "recent_good_match": "",
+        "likely_bad_match": mh.get("likely_bad_match", ""),
+        "reasoning_history": [mh.get("reason", "")] if mh.get("reason") else [],
+    }
+
+
+def get_profile_summary_text(profile):
+    summary = profile.get("summary", "")
+    if isinstance(summary, dict):
+        if summary.get("recent"):
+            return summary.get("recent", "")
+        return summary.get("stable", "")
+    if isinstance(summary, str):
+        return summary
+    return ""
+
+
+def get_profile_summary_display(profile):
+    summary = profile.get("summary", "")
+    if isinstance(summary, dict):
+        pieces = []
+        stable = summary.get("stable", "")
+        recent = summary.get("recent", "")
+        growth = summary.get("growth", "")
+        if stable:
+            pieces.append(stable)
+        if recent:
+            pieces.append(f"最近: {recent}")
+        if growth:
+            pieces.append(f"変化: {growth}")
+        return " / ".join(pieces).strip()
+    if isinstance(summary, str):
+        return summary
+    return ""
+
+
+def get_profile_matching_good_match(profile):
+    mh = profile.get("matching_hypothesis", {})
+    if not isinstance(mh, dict):
+        return ""
+    return mh.get("recent_good_match") or mh.get("stable_good_match") or mh.get("likely_good_match", "")
+
+
+def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> dict:
+    merged = deepcopy(existing)
+
+    merged["user_id"] = existing.get("user_id", new_profile.get("user_id", ""))
+    merged["profile_version"] = PROFILE_VERSION
+    merged["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+
+    # Summary is merged below using structured summary normalization.
+
+    merged["personality_traits"] = {
+        "communication_style": _merge_profile_scalar(
+            existing.get("personality_traits", {}).get("communication_style", ""),
+            new_profile.get("personality_traits", {}).get("communication_style", ""),
+        ),
+        "decision_style": _merge_profile_scalar(
+            existing.get("personality_traits", {}).get("decision_style", ""),
+            new_profile.get("personality_traits", {}).get("decision_style", ""),
+        ),
+        "emotional_tendency": _merge_profile_scalar(
+            existing.get("personality_traits", {}).get("emotional_tendency", ""),
+            new_profile.get("personality_traits", {}).get("emotional_tendency", ""),
+        ),
+    }
+
+    merged["values"] = _merge_profile_list(existing.get("values", []), new_profile.get("values", []))
+
+    merged["preferences"] = {
+        "relationship_style": _merge_profile_scalar(
+            existing.get("preferences", {}).get("relationship_style", ""),
+            new_profile.get("preferences", {}).get("relationship_style", ""),
+        ),
+        "conversation_topics": _merge_profile_list(
+            existing.get("preferences", {}).get("conversation_topics", []),
+            new_profile.get("preferences", {}).get("conversation_topics", []),
+        ),
+        "dislikes": _merge_profile_list(
+            existing.get("preferences", {}).get("dislikes", []),
+            new_profile.get("preferences", {}).get("dislikes", []),
+        ),
+    }
+
+    existing_mh = normalize_matching_hypothesis(existing.get("matching_hypothesis", {}))
+    new_mh = normalize_matching_hypothesis(new_profile.get("matching_hypothesis", {}))
+
+    merged["matching_hypothesis"] = {
+        "stable_good_match": _merge_profile_scalar(
+            existing_mh.get("stable_good_match", ""),
+            new_mh.get("stable_good_match", ""),
+        ),
+        "recent_good_match": _merge_profile_scalar(
+            existing_mh.get("recent_good_match", ""),
+            new_mh.get("recent_good_match", ""),
+        ) or _merge_profile_scalar(
+            existing_mh.get("stable_good_match", ""),
+            new_mh.get("recent_good_match", ""),
+        ),
+        "likely_bad_match": _merge_profile_scalar(
+            existing_mh.get("likely_bad_match", ""),
+            new_mh.get("likely_bad_match", ""),
+        ),
+        "reasoning_history": _merge_profile_list(
+            existing_mh.get("reasoning_history", []),
+            new_mh.get("reasoning_history", []),
+        ),
+    }
+
+    merged["confidence"] = {
+        "summary": _merge_confidence(
+            existing.get("confidence", {}).get("summary", 0.0),
+            new_profile.get("confidence", {}).get("summary", 0.0),
+        ),
+        "values": _merge_confidence(
+            existing.get("confidence", {}).get("values", 0.0),
+            new_profile.get("confidence", {}).get("values", 0.0),
+        ),
+        "matching_hypothesis": _merge_confidence(
+            existing.get("confidence", {}).get("matching_hypothesis", 0.0),
+            new_profile.get("confidence", {}).get("matching_hypothesis", 0.0),
+        ),
+    }
+
+    merged["memory_notes"] = _merge_profile_list(
+        existing.get("memory_notes", []),
+        new_profile.get("memory_notes", []),
+    )
+
+    merged["uncertainties"] = _merge_profile_list(
+        existing.get("uncertainties", []),
+        new_profile.get("uncertainties", []),
+    )
+
+    existing_summary = normalize_summary(existing.get("summary", ""))
+    new_summary = normalize_summary(new_profile.get("summary", ""))
+
+    merged_summary_stable = existing_summary["stable"] or new_summary["stable"]
+    merged_summary_recent = new_summary["recent"] or (new_summary["stable"] if existing_summary["stable"] and new_summary["stable"] != existing_summary["stable"] else "")
+    merged_summary_growth = new_summary["growth"]
+    if not merged_summary_growth and existing_summary["stable"] and new_summary["stable"] and new_summary["stable"] != existing_summary["stable"]:
+        merged_summary_growth = "今回の会話で以前の理解が深まり、より具体的な特徴がわかりました。"
+
+    merged_summary_tensions = _merge_profile_list(existing_summary["tensions"], new_summary["tensions"])
+
+    merged["summary"] = {
+        "stable": merged_summary_stable,
+        "recent": merged_summary_recent,
+        "growth": merged_summary_growth,
+        "tensions": merged_summary_tensions,
+    }
+
+    existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
+    new_evidence = [
+        item for item in (new_profile.get("evidence", []) or [])
+        if item and item not in existing_evidence
+    ]
+    merged_evidence = existing_evidence + new_evidence
+    if session_id not in merged_evidence:
+        merged_evidence.append(session_id)
+    merged["evidence"] = merged_evidence[-10:]
+
+    merged["profile_update_count"] = max(
+        int(existing.get("profile_update_count", 0)),
+        0,
+    ) + 1
+
+    merged["first_created_at"] = existing.get("first_created_at") or datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=9))
+    ).isoformat(timespec="seconds")
+
+    return merged
+
+
+def load_profile_extraction_prompt() -> str:
+    try:
+        path = Path(__file__).parent / "prompts" / "profile_extraction_prompt.txt"
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def extract_fairy_profile(
+    chat_history: list,
+    existing_profile: dict,
+    user_id: str,
+    session_id: str,
+) -> dict:
+    client = get_openai_client()
+    if client is None:
+        return None
+
+    prompt_template = load_profile_extraction_prompt()
+    if not prompt_template:
+        write_debug_log("profile_extraction_prompt_missing", {"user_id": user_id})
+        return None
+
+    conversation = "\n".join(
+        [f"[{msg['role']}]: {msg['content']}" for msg in chat_history]
+    )
+    existing_json = json.dumps(existing_profile, ensure_ascii=False, indent=2)
+
+    prompt = (
+        prompt_template
+        .replace("{{CONVERSATION}}", conversation)
+        .replace("{{EXISTING_PROFILE}}", existing_json)
+        .replace("{{USER_ID}}", user_id)
+        .replace("{{SESSION_ID}}", session_id)
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "あなたはユーザーの会話からパーソナルAIプロフィールを生成・更新するアシスタントです。"
+                        "必ず有効なJSONのみを返してください。"
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_completion_tokens=2000,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content.strip()
+        profile = extract_json(raw)
+        if not isinstance(profile, dict):
+            write_debug_log(
+                "profile_extraction_parse_failed",
+                {"user_id": user_id, "raw": raw[:200]},
+            )
+            return None
+        profile["user_id"] = user_id
+        profile["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+        profile["profile_version"] = PROFILE_VERSION
+        return profile
+    except Exception as e:
+        write_debug_log(
+            "profile_extraction_exception",
+            {"user_id": user_id, "error": str(e)},
+        )
+        return None
+
+
+def update_fairy_profile(user_id: str, chat_history: list, session_id: str) -> bool:
+    try:
+        existing = load_user_profile(user_id)
+        backup_saved = save_user_profile_history(existing.get("user_id", user_id), existing, session_id)
+        if not backup_saved:
+            write_debug_log("user_profile_history_backup_failed", {"user_id": user_id})
+
+        new_profile = extract_fairy_profile(chat_history, existing, user_id, session_id)
+        if new_profile is None:
+            write_debug_log(
+                "profile_update_skipped",
+                {"user_id": user_id, "reason": "extraction_failed"},
+            )
+            return False
+
+        merged_profile = merge_user_profiles(existing, new_profile, session_id)
+        success = save_user_profile(user_id, merged_profile)
+        if success:
+            save_user_profile_history(user_id, merged_profile, session_id)
+        write_debug_log("profile_update_finished", {"user_id": user_id, "success": success})
+        return success
+    except Exception as e:
+        write_debug_log("profile_update_exception", {"user_id": user_id, "error": str(e)})
+        return False
+
+
+def get_google_drive_service():
+    """Streamlit Secrets または token.json の OAuth refresh_token 情報から Google Drive API クライアントを作る。"""
+    try:
+        oauth_info = None
+
+        if "google_oauth" in st.secrets:
+            candidate = st.secrets["google_oauth"]
+            if isinstance(candidate, dict) and candidate.get("refresh_token"):
+                oauth_info = candidate
+
+        if oauth_info is None:
+            token_path = Path(__file__).parent / "token.json"
+            if token_path.exists():
+                try:
+                    with open(token_path, encoding="utf-8") as f:
+                        oauth_info = json.load(f)
+                except Exception as e:
+                    st.session_state.last_drive_upload_error = (
+                        f"token.json の読み込みに失敗しました: {e}"
+                    )
+                    write_error_log("google_drive_token_json_load_failed", str(e))
+                    return None
+
+        if oauth_info is None:
+            st.session_state.last_drive_upload_error = (
+                'Google Drive OAuth 情報が見つかりません。st.secrets["google_oauth"] または token.json を確認してください。'
+            )
+            write_error_log("google_drive_oauth_missing", "google_oauth or token.json missing")
             return None
 
-        oauth = st.secrets["google_oauth"]
+        required_keys = ["refresh_token", "client_id", "client_secret", "token_uri"]
+        missing_keys = [k for k in required_keys if not oauth_info.get(k)]
+        if missing_keys:
+            st.session_state.last_drive_upload_error = (
+                "Google Drive OAuth 情報に次のキーが不足しています: "
+                + ", ".join(missing_keys)
+            )
+            write_error_log(
+                "google_drive_oauth_keys_missing",
+                "oauth keys missing",
+                {"missing_keys": missing_keys},
+            )
+            return None
 
         creds = Credentials(
-            token=None,
-            refresh_token=oauth["refresh_token"],
-            token_uri=oauth.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=oauth["client_id"],
-            client_secret=oauth["client_secret"],
+            token=oauth_info.get("token"),
+            refresh_token=oauth_info.get("refresh_token"),
+            token_uri=oauth_info.get("token_uri"),
+            client_id=oauth_info.get("client_id"),
+            client_secret=oauth_info.get("client_secret"),
             scopes=GOOGLE_DRIVE_SCOPES,
         )
-
         creds.refresh(Request())
-
         return build("drive", "v3", credentials=creds)
 
     except Exception as e:
-        st.session_state.last_drive_upload_error = f"Google Drive OAuth認証に失敗しました: {e}"
+        st.session_state.last_drive_upload_error = (
+            f"Google Drive OAuth認証に失敗しました: {e}\n"
+            "st.secrets[\"google_oauth\"] または token.json の設定を確認してください。"
+        )
         write_error_log("google_drive_oauth_failed", str(e))
         return None
 
@@ -849,6 +1374,7 @@ def save_session_markdown_log(session_status: str = "completed", end_reason: str
             "## セッション情報",
             f"- app_version: v{APP_VERSION}",
             f"- session_id: {session_id}",
+            f"- user_id: {st.session_state.get('user_id', '')}",
             f"- started_at: {started_at}",
             f"- ended_at: {ended_at}",
             f"- log_consent: {consent_value}",
@@ -959,6 +1485,7 @@ def create_initial_session_log():
             "## セッション情報",
             f"- app_version: v{APP_VERSION}",
             f"- session_id: {session_id}",
+            f"- user_id: {st.session_state.get('user_id', '')}",
             f"- started_at: {started_at}",
             "- ended_at: 未完了",
             f"- log_consent: {consent_value}",
@@ -1215,6 +1742,8 @@ def initial_question() -> str:
 
 def ensure_session_state():
     ensure_log_dirs()
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = None
     if "consent_status" not in st.session_state:
         st.session_state.consent_status = None
     if "log_consent" not in st.session_state:
@@ -1508,11 +2037,37 @@ def render_mobile_bottom_bar():
     )
 
 def build_system_prompt() -> str:
-    return (
+    base = (
         "あなたは相手の性格や価値観を丁寧に引き出すAIです。"
         " ユーザーが話した内容を受けて、次の質問や共感を返してください。"
         " ただし、深掘りしすぎず、優しく進めてください。"
     )
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        return base
+    try:
+        profile = load_user_profile(user_id)
+        if not profile.get("summary") and not profile.get("values"):
+            return base
+        hints = []
+        summary_hint = get_profile_summary_display(profile)
+        if summary_hint:
+            hints.append(f"このユーザーの印象: {summary_hint}")
+        vals = profile.get("values", [])
+        if isinstance(vals, list) and vals:
+            hints.append(f"大切にしていること: {', '.join(vals[:3])}")
+        rel = profile.get("preferences", {}).get("relationship_style", "")
+        if rel:
+            hints.append(f"関係スタイルの傾向: {rel}")
+        if not hints:
+            return base
+        hint_text = " / ".join(hints)
+        return (
+            base
+            + f" 【Fairyの記憶（会話に自然に活かしてください。直接言及しないこと）: {hint_text}】"
+        )
+    except Exception:
+        return base
 
 
 def generate_ai_reply(chat_history):
@@ -1591,6 +2146,24 @@ def analyze_user(chat_history):
     conversation = "\n".join(
         [f"[{msg['role']}]: {msg['content']}" for msg in chat_history]
     )
+
+    existing_profile_hint = ""
+    try:
+        user_id = st.session_state.get("user_id")
+        if user_id:
+            existing = load_user_profile(user_id)
+            summary_hint = get_profile_summary_display(existing)
+            if summary_hint:
+                existing_profile_hint = (
+                    "\n\n【Fairyの記憶（補助情報。今回の会話を最優先し、参考程度に使用してください）】\n"
+                    f"これまでの印象: {summary_hint}\n"
+                )
+                vals = existing.get("values", [])
+                if isinstance(vals, list) and vals:
+                    existing_profile_hint += f"大切にしていること: {', '.join(vals)}\n"
+    except Exception:
+        existing_profile_hint = ""
+
     prompt = (
         "あなたはユーザーの性格、価値観、本音を分析するアシスタントです。"
         " 以下の会話履歴から、JSON形式で分析結果を出力してください。\n\n"
@@ -1611,7 +2184,9 @@ def analyze_user(chat_history):
         "- 各項目は100〜180字程度に収めること（summary は80〜140字）\n"
         "- 断定調を避けて「〜かもしれません」「〜の可能性があります」を使うこと\n"
         "- 会話履歴から具体的な引用を1つ含めること\n\n"
-        f"会話履歴:\n{conversation}\n"
+        f"会話履歴:\n{conversation}"
+        + existing_profile_hint
+        + "\n"
     )
     write_debug_log("analysis_started", {"message_count": len(chat_history)})
     try:
@@ -2051,6 +2626,65 @@ def render_support_field(label, value):
         st.write(value)
 
 
+def render_fairy_memory_card(user_id: str):
+    if not user_id:
+        return
+    try:
+        profile = load_user_profile(user_id)
+    except Exception:
+        return
+
+    has_content = (
+        get_profile_summary_text(profile)
+        or (profile.get("values") if isinstance(profile.get("values"), list) and profile.get("values") else None)
+        or profile.get("preferences", {}).get("relationship_style")
+        or get_profile_matching_good_match(profile)
+    )
+    if not has_content:
+        return
+
+    esc = lambda s: html_lib.escape(str(s or "-"))
+    items = []
+    summary_display = get_profile_summary_display(profile)
+    if summary_display:
+        items.append(
+            f'<p><span class="result-label">Fairyの理解:</span> {esc(summary_display)}</p>'
+        )
+    vals = profile.get("values", [])
+    if isinstance(vals, list) and vals:
+        vals_text = "、".join(vals[:5])
+        items.append(
+            f'<p><span class="result-label">大切にしていること:</span> {esc(vals_text)}</p>'
+        )
+    rel = profile.get("preferences", {}).get("relationship_style", "")
+    if rel:
+        items.append(
+            f'<p><span class="result-label">関係スタイル:</span> {esc(rel)}</p>'
+        )
+    good_match = get_profile_matching_good_match(profile)
+    if good_match:
+        items.append(
+            f'<p><span class="result-label">合いそうな相手:</span> {esc(good_match)}</p>'
+        )
+
+    if not items:
+        return
+
+    st.markdown(
+        '<div class="result-card" style="border-left: 4px solid rgba(80,120,220,0.5);'
+        ' background: rgba(220,235,255,0.96);">'
+        '<div class="result-card-title" style="color: #1a3a7c;">'
+        "✨ あなたのFairyが覚えたこと"
+        "</div>"
+        + "".join(items)
+        + '<p class="result-note">'
+        "💡 Fairyはあなたとの会話から少しずつ学んでいます。次回も引き継がれます。"
+        "</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def run_matching():
     """
     マッチング処理全体を3段階で実行：
@@ -2081,6 +2715,19 @@ def run_matching():
         else:
             st.warning("マッチ後支援の生成に失敗しました。今後の機能向上にお役立てします。")
 
+    # ステップ4: Fairyプロフィールを更新
+    user_id = st.session_state.get("user_id")
+    if user_id:
+        session_id = get_or_create_session_id()
+        with st.spinner("Fairyがあなたを学習中..."):
+            profile_updated = update_fairy_profile(
+                user_id, st.session_state.messages, session_id
+            )
+        write_debug_log(
+            "profile_update_result",
+            {"user_id": user_id, "success": profile_updated},
+        )
+
     save_session_markdown_log()
     write_debug_log("session_log_saved")
 
@@ -2103,6 +2750,7 @@ def main():
         return
 
     ensure_session_state()
+    initialize_user_id()
 
     # 「終わる」押下後はアンケート案内画面を最優先表示（同意確認より前）
     if st.session_state.get("show_survey_screen"):
@@ -2249,6 +2897,9 @@ def main():
             unsafe_allow_html=True,
         )
 
+    if st.session_state.get("after_match_support") or st.session_state.get("match_result"):
+        render_fairy_memory_card(st.session_state.get("user_id"))
+
     if st.session_state.match_result and not st.session_state.get("is_processing", False):
         # PC版ボタン（スマホではCSS+JSで非表示、DOMには残してclickNative()が動作）
         st.markdown('<div class="pc-only-btns-post"></div>', unsafe_allow_html=True)
@@ -2272,6 +2923,19 @@ def main():
     # デバッグ情報（開発用）
     # PCでは折りたたみ表示、スマホではJSで非表示にする
     with st.expander("デバッグ情報（開発用）", expanded=False):
+        st.write("user_id:", st.session_state.get("user_id"))
+        st.write("session_id:", st.session_state.get("session_id"))
+        user_id_dbg = st.session_state.get("user_id")
+        if user_id_dbg:
+            profile_path = get_user_profile_path(user_id_dbg)
+            st.write("profile_path:", str(profile_path))
+            st.write("profile_exists:", profile_path.exists())
+            if profile_path.exists():
+                try:
+                    st.write("fairy_profile:", load_user_profile(user_id_dbg))
+                except Exception as e:
+                    st.write("fairy_profile_load_error:", str(e))
+        st.write("---")
         st.write("messages:", st.session_state.messages)
         st.write("last_analysis_response:", st.session_state.last_analysis_response)
         st.write("last_analysis_error:", st.session_state.last_analysis_error)
