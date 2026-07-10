@@ -17,11 +17,12 @@ from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from googleapiclient.http import MediaFileUpload
 from openai import OpenAI
+from fairy_memory import build_fairy_memory_context, categorize_profile_interests
 
 load_dotenv()
 
-APP_VERSION = "0.1.0"
-PROFILE_VERSION = "0.1.0"
+APP_VERSION = "0.1.2"
+PROFILE_VERSION = "0.1.2"
 
 GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeEl3FGWUk_-B7CtGLBOq1YNeeRNcClNibd-8ikF_Weh6rE9A/viewform"
 
@@ -29,6 +30,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 GOOGLE_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+# Default display name placeholder (centralized for easy future replacement)
+DEFAULT_DISPLAY_NAME = "マスターさん"
 
 
 def get_openai_client():
@@ -1789,7 +1793,15 @@ def show_survey_screen():
 def _reset_chat_state():
     st.session_state.is_processing = False
     st.session_state.analyze_insufficient_msg = None
-    st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
+    # Reset or generate a new initial greeting for this session
+    st.session_state.initial_greeting = None
+    st.session_state.initial_greeting_generated = False
+    st.session_state.initial_greeting_fallback_used = False
+    greeting = generate_initial_greeting(DEFAULT_DISPLAY_NAME)
+    st.session_state.messages = [{"role": "assistant", "content": greeting}]
+    st.session_state.fairy_memory_context_used = False
+    st.session_state.fairy_memory_context_fields = []
+    st.session_state.fairy_memory_context_length = 0
     st.session_state.analysis_result = None
     st.session_state.match_result = None
     st.session_state.after_match_support = None
@@ -1839,6 +1851,7 @@ def handle_finish():
         "match_details_error", "selected_candidate_debug",
         "last_after_match_support_response", "last_after_match_support_error",
         "last_reply_finish_reason", "analyze_insufficient_msg", "is_processing",
+        "initial_greeting",
     ]:
         st.session_state.pop(key, None)
 
@@ -1887,8 +1900,24 @@ def load_candidates():
         return json.load(f)
 
 
-def initial_question() -> str:
-    return "あなたが最近、楽しかったことや少し気になっていることを教えてください。"
+def initial_question(user_id: str | None = None) -> str:
+    default = "あなたが最近、楽しかったことや少し気になっていることを教えてください。"
+    if not user_id:
+        return default
+    try:
+        profile = load_user_profile(user_id)
+        if not profile or (not profile.get("summary") and not profile.get("values")):
+            return default
+        category = categorize_profile_interests(profile)
+        if category == "cultural":
+            return "最近、見ている作品や本、動画で気になったことはありますか？"
+        if category == "academic":
+            return "最近、勉強していること、考えていることで気になったことはありますか？"
+        if category == "casual":
+            return "最近、楽しかったことや気になった日常の出来事はありますか？"
+        return default
+    except Exception:
+        return default
 
 
 def ensure_session_state():
@@ -1910,7 +1939,28 @@ def ensure_session_state():
     if "is_processing" not in st.session_state:
         st.session_state.is_processing = False
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
+        # Ensure an initial greeting exists for this session (generate once)
+        if "initial_greeting" not in st.session_state or st.session_state.get("initial_greeting") is None:
+            st.session_state.initial_greeting = None
+            st.session_state.initial_greeting_generated = False
+            st.session_state.initial_greeting_fallback_used = False
+            # generate and store the greeting
+            greeting = generate_initial_greeting(DEFAULT_DISPLAY_NAME)
+            st.session_state.messages = [{"role": "assistant", "content": greeting}]
+        else:
+            st.session_state.messages = [{"role": "assistant", "content": st.session_state.get("initial_greeting")}]
+    if "initial_greeting" not in st.session_state:
+        st.session_state.initial_greeting = None
+    if "initial_greeting_generated" not in st.session_state:
+        st.session_state.initial_greeting_generated = False
+    if "initial_greeting_fallback_used" not in st.session_state:
+        st.session_state.initial_greeting_fallback_used = False
+    if "fairy_memory_context_used" not in st.session_state:
+        st.session_state.fairy_memory_context_used = False
+    if "fairy_memory_context_fields" not in st.session_state:
+        st.session_state.fairy_memory_context_fields = []
+    if "fairy_memory_context_length" not in st.session_state:
+        st.session_state.fairy_memory_context_length = 0
     if "analysis_result" not in st.session_state:
         st.session_state.analysis_result = None
     if "match_result" not in st.session_state:
@@ -2195,29 +2245,67 @@ def build_system_prompt() -> str:
     )
     user_id = st.session_state.get("user_id")
     if not user_id:
+        st.session_state.fairy_memory_context_used = False
+        st.session_state.fairy_memory_context_fields = []
+        st.session_state.fairy_memory_context_length = 0
+        write_debug_log(
+            "fairy_memory_context_not_used",
+            {
+                "reason": "no_user_id",
+            },
+        )
         return base
     try:
         profile = load_user_profile(user_id)
-        if not profile.get("summary") and not profile.get("values"):
+        memory_context, used_fields = build_fairy_memory_context(profile)
+        if not memory_context:
+            st.session_state.fairy_memory_context_used = False
+            st.session_state.fairy_memory_context_fields = []
+            st.session_state.fairy_memory_context_length = 0
+            write_debug_log(
+                "fairy_memory_context_not_used",
+                {
+                    "user_id": user_id,
+                    "reason": "profile_empty",
+                },
+            )
             return base
-        hints = []
-        summary_hint = get_profile_summary_display(profile)
-        if summary_hint:
-            hints.append(f"このユーザーの印象: {summary_hint}")
-        vals = profile.get("values", [])
-        if isinstance(vals, list) and vals:
-            hints.append(f"大切にしていること: {', '.join(vals[:3])}")
-        rel = profile.get("preferences", {}).get("relationship_style", "")
-        if rel:
-            hints.append(f"関係スタイルの傾向: {rel}")
-        if not hints:
-            return base
-        hint_text = " / ".join(hints)
-        return (
-            base
-            + f" 【Fairyの記憶（会話に自然に活かしてください。直接言及しないこと）: {hint_text}】"
+        st.session_state.fairy_memory_context_used = True
+        st.session_state.fairy_memory_context_fields = used_fields
+        st.session_state.fairy_memory_context_length = len(memory_context)
+        write_debug_log(
+            "fairy_memory_context_used",
+            {
+                "user_id": user_id,
+                "session_id": get_or_create_session_id(),
+                "context_length": len(memory_context),
+                "used_fields": used_fields,
+            },
         )
-    except Exception:
+        memory_rules = (
+            "\n\n【保存されたプロフィールの活用ルール】"
+            "\n以下の情報はユーザーとの過去の会話から学んだ背景知識です。会話を自然に進めるための補助情報として使ってください。"
+            "\n・今回のユーザーの発言を最優先してください。"
+            "\n・発言と保存情報が矛盾する場合は、今回の発言を優先し、保存情報は活用しないでください。"
+            "\n・保存情報を断定的な事実として扱わないでください。背景として参考にする程度にしてください。"
+            "\n・『以前あなたは〜と言いました』のように不自然に記憶を明示しないでください。"
+            "\n・保存情報と関連がある場合だけ、自然に活用してください。無関係な場合は持ち出さないでください。"
+            "\n・質問の方向、共感、具体例をユーザーの関心に合わせて調整してください。"
+            "\n・毎回同じ話題を持ち出さないでください。"
+            "\n・保存情報にない情報を作り出さないでください。"
+            "\n・プロフィールより、現在の会話の自然さを優先してください。"
+            f"\n\n【背景情報】\n{memory_context}"
+        )
+        return base + memory_rules
+    except Exception as e:
+        write_debug_log(
+            "fairy_memory_context_not_used",
+            {
+                "user_id": user_id,
+                "reason": "profile_load_failed",
+                "error": str(e),
+            },
+        )
         return base
 
 
@@ -2251,6 +2339,134 @@ def generate_ai_reply(chat_history):
         return content
     except Exception as e:
         return f"AI応答の取得中にエラーが発生しました: {e}"
+
+
+def generate_initial_greeting(display_name: str | None = None) -> str:
+    """
+    Generate a short initial greeting via OpenAI. Falls back to a fixed phrase on any error
+    or invalid output. Does not use any profile or history. Only the optional display_name
+    may be provided and, if present, must be used verbatim when the greeting chooses to
+    address the user.
+    """
+    client = get_openai_client()
+    session_id = get_or_create_session_id()
+    write_debug_log("initial_greeting_generation_started", {"session_id": session_id})
+
+    fallback = "今日はどんな話から始めましょうか？"
+
+    if client is None:
+        write_debug_log("initial_greeting_generation_failed", {"reason": "no_client", "fallback_used": True})
+        st.session_state.initial_greeting = fallback
+        st.session_state.initial_greeting_fallback_used = True
+        st.session_state.initial_greeting_generated = True
+        return fallback
+
+    # Build system prompt per spec
+    system_prompt = (
+        "あなたはユーザー専属のパーソナルAI、Fairyです。\n"
+        "新しい会話を始めるための、短く自然な挨拶を1つ作ってください。\n\n"
+        "条件：\n"
+        "- 誰にでも通用する内容にする\n"
+        "- 過去の会話、性格、価値観、興味、プロフィールには触れない\n"
+        "- 名前で呼びかける必要はない\n"
+        "- 名前で呼びかける場合は、指定された表示名を一字一句変更せず使う\n"
+        "- 指定された表示名以外の呼び名を作らない\n"
+        "- 質問、雑談への誘い、相談の促し、手伝いの提案など、会話の始め方を毎回少し変える\n"
+        "- 毎回「最近〜」で始めない\n"
+        "- 毎回同じ定型表現を避ける\n"
+        "- 重すぎる質問や、人生観・悩みをいきなり深掘りする質問にしない\n"
+        "- 答えやすく、会話を始めやすい内容にする\n"
+        "- 1〜2文\n"
+        "- 80文字以内\n"
+        "- 挨拶文だけを出力する\n"
+        "- Markdown、JSON、引用符、説明文は出力しない"
+    )
+
+    if display_name:
+        user_msg = f"使用可能な表示名: {display_name}\n呼びかけは任意です。"
+    else:
+        user_msg = "表示名はありません。名前で呼びかけないでください。"
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.9,
+            max_completion_tokens=100,
+        )
+
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        text = response.choices[0].message.content.strip()
+
+        # Basic validation
+        def invalid_format(s: str) -> bool:
+            if not isinstance(s, str):
+                return True
+            if not s.strip():
+                return True
+            if "```" in s:
+                return True
+            if s.strip().startswith("{") and s.strip().endswith("}"):
+                return True
+            if "<" in s and ">" in s and (s.strip().startswith("<") or s.strip().endswith(">")):
+                return True
+            return False
+
+        # Reject too long (prefer <=80 per spec)
+        length = len(text)
+        used_display_name = False
+        # detect any '〇〇さん' usages and ensure none other than allowed
+        import re
+
+        name_matches = re.findall(r"[^\s、。]*さん", text)
+        if name_matches:
+            # If any name != display_name exactly, invalid
+            for nm in name_matches:
+                if display_name and nm == display_name:
+                    used_display_name = True
+                else:
+                    write_debug_log("initial_greeting_generation_failed", {"reason": "invalid_name", "fallback_used": True})
+                    st.session_state.initial_greeting = fallback
+                    st.session_state.initial_greeting_fallback_used = True
+                    st.session_state.initial_greeting_generated = True
+                    return fallback
+
+        if invalid_format(text):
+            write_debug_log("initial_greeting_generation_failed", {"reason": "invalid_format", "fallback_used": True})
+            st.session_state.initial_greeting = fallback
+            st.session_state.initial_greeting_fallback_used = True
+            st.session_state.initial_greeting_generated = True
+            return fallback
+
+        if length > 80:
+            write_debug_log("initial_greeting_fallback_used", {"session_id": session_id, "reason": "too_long", "fallback_used": True})
+            st.session_state.initial_greeting = fallback
+            st.session_state.initial_greeting_fallback_used = True
+            st.session_state.initial_greeting_generated = True
+            return fallback
+
+        # Passed validations
+        st.session_state.initial_greeting = text
+        st.session_state.initial_greeting_generated = True
+        st.session_state.initial_greeting_fallback_used = False
+        write_debug_log("initial_greeting_generation_finished", {
+            "session_id": session_id,
+            "used_display_name": used_display_name,
+            "greeting_length": length,
+            "finish_reason": finish_reason,
+            "fallback_used": False,
+        })
+        return text
+
+    except Exception as e:
+        write_debug_log("initial_greeting_generation_failed", {"reason": "api_error", "fallback_used": True, "error": str(e)})
+        st.session_state.initial_greeting = fallback
+        st.session_state.initial_greeting_fallback_used = True
+        st.session_state.initial_greeting_generated = True
+        return fallback
 
 
 def extract_json(text: str):
@@ -2900,8 +3116,8 @@ def main():
         st.error("OPENAI_API_KEY が設定されていません。.env を確認してください。")
         return
 
-    ensure_session_state()
     initialize_user_id()
+    ensure_session_state()
 
     # 「終わる」押下後はアンケート案内画面を最優先表示（同意確認より前）
     if st.session_state.get("show_survey_screen"):
@@ -3081,11 +3297,21 @@ def main():
             profile_path = get_user_profile_path(user_id_dbg)
             st.write("profile_path:", str(profile_path))
             st.write("profile_exists:", profile_path.exists())
-            if profile_path.exists():
-                try:
-                    st.write("fairy_profile:", load_user_profile(user_id_dbg))
-                except Exception as e:
-                    st.write("fairy_profile_load_error:", str(e))
+            st.write("profile_exists:", profile_path.exists())
+        profile_loaded = False
+        if profile_path.exists():
+            try:
+                profile = load_user_profile(user_id_dbg)
+                profile_loaded = bool(profile and (profile.get("summary") or profile.get("values") or profile.get("preferences") or profile.get("matching_hypothesis")))
+            except Exception as e:
+                st.write("fairy_profile_load_error:", str(e))
+        st.write("profile_loaded:", profile_loaded)
+        st.write("fairy_memory_context_used:", st.session_state.get("fairy_memory_context_used", False))
+        st.write("fairy_memory_context_length:", st.session_state.get("fairy_memory_context_length", 0))
+        st.write("fairy_memory_context_fields:", st.session_state.get("fairy_memory_context_fields", []))
+        st.write("initial_greeting_generated:", st.session_state.get("initial_greeting_generated", False))
+        st.write("initial_greeting_fallback_used:", st.session_state.get("initial_greeting_fallback_used", False))
+        st.write("initial_question_personalized:", st.session_state.get("messages") and st.session_state.get("messages")[0].get("content") != "あなたが最近、楽しかったことや少し気になっていることを教えてください。")
         st.write("---")
         st.write("messages:", st.session_state.messages)
         st.write("last_analysis_response:", st.session_state.last_analysis_response)
