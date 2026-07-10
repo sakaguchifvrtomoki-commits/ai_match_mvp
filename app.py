@@ -867,20 +867,33 @@ def save_user_profile_history(user_id: str, profile: dict, session_id: str) -> b
 def _merge_profile_scalar(existing_value, new_value):
     if new_value is None:
         return existing_value
-    if isinstance(new_value, str) and not new_value.strip():
-        return existing_value
+    if isinstance(new_value, str):
+        if not new_value.strip():
+            return existing_value
+        return new_value
     return new_value
 
 
-def _merge_profile_list(existing_list, new_list):
+def _merge_profile_list(existing_list, new_list, limit=None):
     if not isinstance(existing_list, list):
         existing_list = []
-    if not isinstance(new_list, list) or len(new_list) == 0:
-        return existing_list
-    merged = list(existing_list)
-    for item in new_list:
-        if item and item not in merged:
-            merged.append(item)
+    if not isinstance(new_list, list):
+        new_list = []
+
+    merged = []
+    for item in list(existing_list) + list(new_list):
+        if item is None:
+            continue
+        if isinstance(item, str):
+            normalized = item.strip()
+        else:
+            normalized = str(item).strip()
+        if not normalized:
+            continue
+        if normalized not in [str(existing_item).strip() for existing_item in merged if existing_item is not None]:
+            merged.append(item if not isinstance(item, str) else normalized)
+    if limit is not None:
+        return merged[:limit]
     return merged
 
 
@@ -894,6 +907,31 @@ def _merge_confidence(existing_value, new_value):
     except Exception:
         new_value = 0.0
     return max(existing_value, new_value)
+
+
+def _is_profile_diff_payload(profile):
+    if not isinstance(profile, dict):
+        return False
+    if "personality_traits_updates" in profile or "preference_updates" in profile or "matching_hypothesis_updates" in profile or "new_values" in profile:
+        return True
+    summary = profile.get("summary", {})
+    return isinstance(summary, dict) and "new_tensions" in summary
+
+
+def _merge_summary_from_diff(existing_profile: dict, new_profile: dict) -> dict:
+    existing_summary = normalize_summary(existing_profile.get("summary", ""))
+    diff_summary = new_profile.get("summary", {}) if isinstance(new_profile.get("summary", {}), dict) else {}
+    stable_candidate = diff_summary.get("stable_candidate") or diff_summary.get("stable", "")
+    stable = _merge_profile_scalar(existing_summary.get("stable", ""), stable_candidate)
+    recent = _merge_profile_scalar(existing_summary.get("recent", ""), diff_summary.get("recent", ""))
+    growth = _merge_profile_scalar(existing_summary.get("growth", ""), diff_summary.get("growth", ""))
+    tensions = _merge_profile_list(existing_summary.get("tensions", []), diff_summary.get("new_tensions", []), limit=15)
+    return {
+        "stable": stable,
+        "recent": recent,
+        "growth": growth,
+        "tensions": tensions,
+    }
 
 
 def normalize_summary(summary):
@@ -976,117 +1014,192 @@ def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> d
     merged["profile_version"] = PROFILE_VERSION
     merged["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
 
-    # Summary is merged below using structured summary normalization.
+    if _is_profile_diff_payload(new_profile):
+        existing_personality = existing.get("personality_traits", {}) if isinstance(existing.get("personality_traits", {}), dict) else {}
+        personality_updates = new_profile.get("personality_traits_updates", {}) if isinstance(new_profile.get("personality_traits_updates", {}), dict) else {}
+        merged["personality_traits"] = {
+            "communication_style": _merge_profile_scalar(
+                existing_personality.get("communication_style", ""),
+                personality_updates.get("communication_style", ""),
+            ),
+            "decision_style": _merge_profile_scalar(
+                existing_personality.get("decision_style", ""),
+                personality_updates.get("decision_style", ""),
+            ),
+            "emotional_tendency": _merge_profile_scalar(
+                existing_personality.get("emotional_tendency", ""),
+                personality_updates.get("emotional_tendency", ""),
+            ),
+        }
 
-    merged["personality_traits"] = {
-        "communication_style": _merge_profile_scalar(
-            existing.get("personality_traits", {}).get("communication_style", ""),
-            new_profile.get("personality_traits", {}).get("communication_style", ""),
-        ),
-        "decision_style": _merge_profile_scalar(
-            existing.get("personality_traits", {}).get("decision_style", ""),
-            new_profile.get("personality_traits", {}).get("decision_style", ""),
-        ),
-        "emotional_tendency": _merge_profile_scalar(
-            existing.get("personality_traits", {}).get("emotional_tendency", ""),
-            new_profile.get("personality_traits", {}).get("emotional_tendency", ""),
-        ),
-    }
+        merged["values"] = _merge_profile_list(existing.get("values", []), new_profile.get("new_values", []), limit=10)
 
-    merged["values"] = _merge_profile_list(existing.get("values", []), new_profile.get("values", []))
+        existing_preferences = existing.get("preferences", {}) if isinstance(existing.get("preferences", {}), dict) else {}
+        preference_updates = new_profile.get("preference_updates", {}) if isinstance(new_profile.get("preference_updates", {}), dict) else {}
+        merged["preferences"] = {
+            "relationship_style": _merge_profile_scalar(
+                existing_preferences.get("relationship_style", ""),
+                preference_updates.get("relationship_style", ""),
+            ),
+            "conversation_topics": _merge_profile_list(
+                existing_preferences.get("conversation_topics", []),
+                preference_updates.get("new_conversation_topics", []),
+                limit=30,
+            ),
+            "dislikes": _merge_profile_list(
+                existing_preferences.get("dislikes", []),
+                preference_updates.get("new_dislikes", []),
+                limit=15,
+            ),
+        }
 
-    merged["preferences"] = {
-        "relationship_style": _merge_profile_scalar(
-            existing.get("preferences", {}).get("relationship_style", ""),
-            new_profile.get("preferences", {}).get("relationship_style", ""),
-        ),
-        "conversation_topics": _merge_profile_list(
-            existing.get("preferences", {}).get("conversation_topics", []),
-            new_profile.get("preferences", {}).get("conversation_topics", []),
-        ),
-        "dislikes": _merge_profile_list(
-            existing.get("preferences", {}).get("dislikes", []),
-            new_profile.get("preferences", {}).get("dislikes", []),
-        ),
-    }
+        existing_mh = normalize_matching_hypothesis(existing.get("matching_hypothesis", {}))
+        mh_updates = new_profile.get("matching_hypothesis_updates", {}) if isinstance(new_profile.get("matching_hypothesis_updates", {}), dict) else {}
+        merged["matching_hypothesis"] = {
+            "stable_good_match": _merge_profile_scalar(
+                existing_mh.get("stable_good_match", ""),
+                mh_updates.get("stable_good_match_candidate", ""),
+            ),
+            "recent_good_match": _merge_profile_scalar(
+                existing_mh.get("recent_good_match", ""),
+                mh_updates.get("recent_good_match", ""),
+            ),
+            "likely_bad_match": _merge_profile_scalar(
+                existing_mh.get("likely_bad_match", ""),
+                mh_updates.get("likely_bad_match", ""),
+            ),
+            "reasoning_history": _merge_profile_list(
+                existing_mh.get("reasoning_history", []),
+                mh_updates.get("new_reasons", []),
+                limit=20,
+            ),
+        }
 
-    existing_mh = normalize_matching_hypothesis(existing.get("matching_hypothesis", {}))
-    new_mh = normalize_matching_hypothesis(new_profile.get("matching_hypothesis", {}))
+        merged["confidence"] = {
+            "summary": _merge_confidence(
+                existing.get("confidence", {}).get("summary", 0.0),
+                new_profile.get("confidence", {}).get("summary", 0.0),
+            ),
+            "values": _merge_confidence(
+                existing.get("confidence", {}).get("values", 0.0),
+                new_profile.get("confidence", {}).get("values", 0.0),
+            ),
+            "matching_hypothesis": _merge_confidence(
+                existing.get("confidence", {}).get("matching_hypothesis", 0.0),
+                new_profile.get("confidence", {}).get("matching_hypothesis", 0.0),
+            ),
+        }
 
-    merged["matching_hypothesis"] = {
-        "stable_good_match": _merge_profile_scalar(
-            existing_mh.get("stable_good_match", ""),
-            new_mh.get("stable_good_match", ""),
-        ),
-        "recent_good_match": _merge_profile_scalar(
-            existing_mh.get("recent_good_match", ""),
-            new_mh.get("recent_good_match", ""),
-        ) or _merge_profile_scalar(
-            existing_mh.get("stable_good_match", ""),
-            new_mh.get("recent_good_match", ""),
-        ),
-        "likely_bad_match": _merge_profile_scalar(
-            existing_mh.get("likely_bad_match", ""),
-            new_mh.get("likely_bad_match", ""),
-        ),
-        "reasoning_history": _merge_profile_list(
-            existing_mh.get("reasoning_history", []),
-            new_mh.get("reasoning_history", []),
-        ),
-    }
+        merged["summary"] = _merge_summary_from_diff(existing, new_profile)
+    else:
+        merged["personality_traits"] = {
+            "communication_style": _merge_profile_scalar(
+                existing.get("personality_traits", {}).get("communication_style", ""),
+                new_profile.get("personality_traits", {}).get("communication_style", ""),
+            ),
+            "decision_style": _merge_profile_scalar(
+                existing.get("personality_traits", {}).get("decision_style", ""),
+                new_profile.get("personality_traits", {}).get("decision_style", ""),
+            ),
+            "emotional_tendency": _merge_profile_scalar(
+                existing.get("personality_traits", {}).get("emotional_tendency", ""),
+                new_profile.get("personality_traits", {}).get("emotional_tendency", ""),
+            ),
+        }
 
-    merged["confidence"] = {
-        "summary": _merge_confidence(
-            existing.get("confidence", {}).get("summary", 0.0),
-            new_profile.get("confidence", {}).get("summary", 0.0),
-        ),
-        "values": _merge_confidence(
-            existing.get("confidence", {}).get("values", 0.0),
-            new_profile.get("confidence", {}).get("values", 0.0),
-        ),
-        "matching_hypothesis": _merge_confidence(
-            existing.get("confidence", {}).get("matching_hypothesis", 0.0),
-            new_profile.get("confidence", {}).get("matching_hypothesis", 0.0),
-        ),
-    }
+        merged["values"] = _merge_profile_list(existing.get("values", []), new_profile.get("values", []), limit=10)
 
-    merged["memory_notes"] = _merge_profile_list(
-        existing.get("memory_notes", []),
-        new_profile.get("memory_notes", []),
-    )
+        merged["preferences"] = {
+            "relationship_style": _merge_profile_scalar(
+                existing.get("preferences", {}).get("relationship_style", ""),
+                new_profile.get("preferences", {}).get("relationship_style", ""),
+            ),
+            "conversation_topics": _merge_profile_list(
+                existing.get("preferences", {}).get("conversation_topics", []),
+                new_profile.get("preferences", {}).get("conversation_topics", []),
+                limit=30,
+            ),
+            "dislikes": _merge_profile_list(
+                existing.get("preferences", {}).get("dislikes", []),
+                new_profile.get("preferences", {}).get("dislikes", []),
+                limit=15,
+            ),
+        }
 
-    merged["uncertainties"] = _merge_profile_list(
-        existing.get("uncertainties", []),
-        new_profile.get("uncertainties", []),
-    )
+        existing_mh = normalize_matching_hypothesis(existing.get("matching_hypothesis", {}))
+        new_mh = normalize_matching_hypothesis(new_profile.get("matching_hypothesis", {}))
 
-    existing_summary = normalize_summary(existing.get("summary", ""))
-    new_summary = normalize_summary(new_profile.get("summary", ""))
+        merged["matching_hypothesis"] = {
+            "stable_good_match": _merge_profile_scalar(
+                existing_mh.get("stable_good_match", ""),
+                new_mh.get("stable_good_match", ""),
+            ),
+            "recent_good_match": _merge_profile_scalar(
+                existing_mh.get("recent_good_match", ""),
+                new_mh.get("recent_good_match", ""),
+            ) or _merge_profile_scalar(
+                existing_mh.get("stable_good_match", ""),
+                new_mh.get("recent_good_match", ""),
+            ),
+            "likely_bad_match": _merge_profile_scalar(
+                existing_mh.get("likely_bad_match", ""),
+                new_mh.get("likely_bad_match", ""),
+            ),
+            "reasoning_history": _merge_profile_list(
+                existing_mh.get("reasoning_history", []),
+                new_mh.get("reasoning_history", []),
+                limit=20,
+            ),
+        }
 
-    merged_summary_stable = existing_summary["stable"] or new_summary["stable"]
-    merged_summary_recent = new_summary["recent"] or (new_summary["stable"] if existing_summary["stable"] and new_summary["stable"] != existing_summary["stable"] else "")
-    merged_summary_growth = new_summary["growth"]
-    if not merged_summary_growth and existing_summary["stable"] and new_summary["stable"] and new_summary["stable"] != existing_summary["stable"]:
-        merged_summary_growth = "今回の会話で以前の理解が深まり、より具体的な特徴がわかりました。"
+        merged["confidence"] = {
+            "summary": _merge_confidence(
+                existing.get("confidence", {}).get("summary", 0.0),
+                new_profile.get("confidence", {}).get("summary", 0.0),
+            ),
+            "values": _merge_confidence(
+                existing.get("confidence", {}).get("values", 0.0),
+                new_profile.get("confidence", {}).get("values", 0.0),
+            ),
+            "matching_hypothesis": _merge_confidence(
+                existing.get("confidence", {}).get("matching_hypothesis", 0.0),
+                new_profile.get("confidence", {}).get("matching_hypothesis", 0.0),
+            ),
+        }
 
-    merged_summary_tensions = _merge_profile_list(existing_summary["tensions"], new_summary["tensions"])
+        merged["memory_notes"] = _merge_profile_list(
+            existing.get("memory_notes", []),
+            new_profile.get("memory_notes", []),
+        )
 
-    merged["summary"] = {
-        "stable": merged_summary_stable,
-        "recent": merged_summary_recent,
-        "growth": merged_summary_growth,
-        "tensions": merged_summary_tensions,
-    }
+        merged["uncertainties"] = _merge_profile_list(
+            existing.get("uncertainties", []),
+            new_profile.get("uncertainties", []),
+        )
+
+        existing_summary = normalize_summary(existing.get("summary", ""))
+        new_summary = normalize_summary(new_profile.get("summary", ""))
+
+        merged_summary_stable = existing_summary["stable"] or new_summary["stable"]
+        merged_summary_recent = new_summary["recent"] or (new_summary["stable"] if existing_summary["stable"] and new_summary["stable"] != existing_summary["stable"] else "")
+        merged_summary_growth = new_summary["growth"]
+        if not merged_summary_growth and existing_summary["stable"] and new_summary["stable"] and new_summary["stable"] != existing_summary["stable"]:
+            merged_summary_growth = "今回の会話で以前の理解が深まり、より具体的な特徴がわかりました。"
+
+        merged_summary_tensions = _merge_profile_list(existing_summary["tensions"], new_summary["tensions"], limit=15)
+
+        merged["summary"] = {
+            "stable": merged_summary_stable,
+            "recent": merged_summary_recent,
+            "growth": merged_summary_growth,
+            "tensions": merged_summary_tensions,
+        }
 
     existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
-    new_evidence = [
-        item for item in (new_profile.get("evidence", []) or [])
-        if item and item not in existing_evidence
-    ]
-    merged_evidence = existing_evidence + new_evidence
+    merged_evidence = list(existing_evidence)
     if session_id not in merged_evidence:
         merged_evidence.append(session_id)
-    merged["evidence"] = merged_evidence[-10:]
+    merged["evidence"] = _merge_profile_list(merged_evidence, [], limit=10)
 
     merged["profile_update_count"] = max(
         int(existing.get("profile_update_count", 0)),
@@ -1129,49 +1242,87 @@ def extract_fairy_profile(
     )
     existing_json = json.dumps(existing_profile, ensure_ascii=False, indent=2)
 
-    prompt = (
-        prompt_template
-        .replace("{{CONVERSATION}}", conversation)
-        .replace("{{EXISTING_PROFILE}}", existing_json)
-        .replace("{{USER_ID}}", user_id)
-        .replace("{{SESSION_ID}}", session_id)
-    )
+    def build_prompt(shorter: bool = False) -> str:
+        prompt = (
+            prompt_template
+            .replace("{{CONVERSATION}}", conversation)
+            .replace("{{EXISTING_PROFILE}}", existing_json)
+            .replace("{{USER_ID}}", user_id)
+            .replace("{{SESSION_ID}}", session_id)
+        )
+        if shorter:
+            prompt += "\n\n【再試行】前回の出力が不正でした。今回はより短い差分JSONだけを返してください。説明文や余分なキーは付けず、必要なキーだけを出力してください。"
+        return prompt
 
-    try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "あなたはユーザーの会話からパーソナルAIプロフィールを生成・更新するアシスタントです。"
-                        "必ず有効なJSONのみを返してください。"
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.3,
-            max_completion_tokens=2000,
-            response_format={"type": "json_object"},
-        )
-        raw = response.choices[0].message.content.strip()
-        profile = extract_json(raw)
-        if not isinstance(profile, dict):
-            write_debug_log(
-                "profile_extraction_parse_failed",
-                {"user_id": user_id, "raw": raw[:200]},
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "あなたはユーザーの会話からパーソナルAIプロフィールを生成・更新するアシスタントです。"
+                            "必ず有効なJSONのみを返してください。"
+                        ),
+                    },
+                    {"role": "user", "content": build_prompt(shorter=attempt == 1)},
+                ],
+                temperature=0.3,
+                max_completion_tokens=5000,
+                response_format={"type": "json_object"},
             )
-            return None
-        profile["user_id"] = user_id
-        profile["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-        profile["profile_version"] = PROFILE_VERSION
-        return profile
-    except Exception as e:
-        write_debug_log(
-            "profile_extraction_exception",
-            {"user_id": user_id, "error": str(e)},
-        )
-        return None
+            choice = response.choices[0]
+            raw = (choice.message.content or "").strip()
+            finish_reason = getattr(choice, "finish_reason", None)
+            preview_head = raw[:200]
+            preview_tail = raw[-200:] if len(raw) > 200 else raw
+            profile = extract_json(raw)
+            parsed_success = isinstance(profile, dict)
+            write_debug_log(
+                "profile_extraction_result",
+                {
+                    "user_id": user_id,
+                    "attempt": attempt + 1,
+                    "finish_reason": finish_reason,
+                    "raw_response_length": len(raw),
+                    "raw_response_head": preview_head,
+                    "raw_response_tail": preview_tail,
+                    "json_parse_success": parsed_success,
+                },
+            )
+            if not parsed_success:
+                write_debug_log(
+                    "profile_extraction_parse_failed",
+                    {
+                        "user_id": user_id,
+                        "attempt": attempt + 1,
+                        "finish_reason": finish_reason,
+                        "raw_response_length": len(raw),
+                        "raw_response_head": preview_head,
+                        "raw_response_tail": preview_tail,
+                    },
+                )
+                if attempt == 1:
+                    return None
+                continue
+
+            profile["user_id"] = user_id
+            profile["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            profile["profile_version"] = PROFILE_VERSION
+            return profile
+        except Exception as e:
+            write_debug_log(
+                "profile_extraction_exception",
+                {
+                    "user_id": user_id,
+                    "attempt": attempt + 1,
+                    "error": str(e),
+                },
+            )
+            if attempt == 1:
+                return None
+    return None
 
 
 def update_fairy_profile(user_id: str, chat_history: list, session_id: str) -> bool:
