@@ -4,6 +4,7 @@ import html as html_lib
 import json
 import math
 import os
+import re
 import traceback
 import uuid
 from copy import deepcopy
@@ -21,8 +22,8 @@ from fairy_memory import build_fairy_memory_context, categorize_profile_interest
 
 load_dotenv()
 
-APP_VERSION = "0.1.2"
-PROFILE_VERSION = "0.1.2"
+APP_VERSION = "0.1.3"
+PROFILE_VERSION = "0.1.3"
 
 GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeEl3FGWUk_-B7CtGLBOq1YNeeRNcClNibd-8ikF_Weh6rE9A/viewform"
 
@@ -784,16 +785,23 @@ def _empty_profile(user_id: str) -> dict:
             "recent": "",
             "growth": "",
             "tensions": [],
+            "stable_candidates": [],
         },
         "personality_traits": {
             "communication_style": "",
             "decision_style": "",
             "emotional_tendency": "",
         },
+        "personality_trait_candidates": {
+            "communication_style": [],
+            "decision_style": [],
+            "emotional_tendency": [],
+        },
         "values": [],
         "preferences": {
             "relationship_style": "",
             "conversation_topics": [],
+            "conversation_topic_metadata": [],
             "dislikes": [],
         },
         "matching_hypothesis": {
@@ -801,6 +809,8 @@ def _empty_profile(user_id: str) -> dict:
             "recent_good_match": "",
             "likely_bad_match": "",
             "reasoning_history": [],
+            "reasoning_history_entries": [],
+            "stable_candidates": [],
         },
         "confidence": {
             "summary": 0.0,
@@ -824,6 +834,26 @@ def load_user_profile(user_id: str) -> dict:
             raise ValueError("プロフィールが辞書型ではありません")
         profile["summary"] = normalize_summary(profile.get("summary", ""))
         profile["matching_hypothesis"] = normalize_matching_hypothesis(profile.get("matching_hypothesis", {}))
+        if not isinstance(profile.get("personality_trait_candidates", {}), dict):
+            profile["personality_trait_candidates"] = {
+                "communication_style": [],
+                "decision_style": [],
+                "emotional_tendency": [],
+            }
+        else:
+            for key in ["communication_style", "decision_style", "emotional_tendency"]:
+                if key not in profile["personality_trait_candidates"] or not isinstance(profile["personality_trait_candidates"][key], list):
+                    profile["personality_trait_candidates"][key] = []
+        preferences = profile.get("preferences", {}) if isinstance(profile.get("preferences", {}), dict) else {}
+        if not isinstance(preferences.get("conversation_topic_metadata", []), list):
+            preferences["conversation_topic_metadata"] = []
+        profile["preferences"] = preferences
+        mh = profile.get("matching_hypothesis", {}) if isinstance(profile.get("matching_hypothesis", {}), dict) else {}
+        if not isinstance(mh.get("reasoning_history_entries", []), list):
+            mh["reasoning_history_entries"] = []
+        if not isinstance(mh.get("stable_candidates", []), list):
+            mh["stable_candidates"] = []
+        profile["matching_hypothesis"] = mh
         return profile
     except Exception as e:
         try:
@@ -868,14 +898,12 @@ def save_user_profile_history(user_id: str, profile: dict, session_id: str) -> b
         return False
 
 
-def _merge_profile_scalar(existing_value, new_value):
-    if new_value is None:
-        return existing_value
-    if isinstance(new_value, str):
-        if not new_value.strip():
-            return existing_value
-        return new_value
-    return new_value
+def _normalize_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
 
 
 def _merge_profile_list(existing_list, new_list, limit=None):
@@ -885,20 +913,101 @@ def _merge_profile_list(existing_list, new_list, limit=None):
         new_list = []
 
     merged = []
+    seen = set()
     for item in list(existing_list) + list(new_list):
         if item is None:
             continue
-        if isinstance(item, str):
-            normalized = item.strip()
-        else:
-            normalized = str(item).strip()
+        normalized = _normalize_text(item)
         if not normalized:
             continue
-        if normalized not in [str(existing_item).strip() for existing_item in merged if existing_item is not None]:
+        if normalized not in seen:
+            seen.add(normalized)
             merged.append(item if not isinstance(item, str) else normalized)
     if limit is not None:
         return merged[:limit]
     return merged
+
+
+def _merge_profile_list_with_priority(existing_list, new_list, limit=None, metadata=None):
+    if not isinstance(existing_list, list):
+        existing_list = []
+    if not isinstance(new_list, list):
+        new_list = []
+    if not isinstance(metadata, list):
+        metadata = []
+
+    merged_items = []
+    merged_meta = []
+    seen = {}
+
+    def push_item(item, meta, from_new=False):
+        if item is None:
+            return
+        normalized = _normalize_text(item)
+        if not normalized:
+            return
+        key = normalized.lower()
+        if key not in seen:
+            seen[key] = len(merged_items)
+            merged_items.append(normalized)
+            merged_meta.append({
+                **(meta if isinstance(meta, dict) else {}),
+                "importance": int((meta or {}).get("importance", 1 if not from_new else 2)),
+                "support_count": int((meta or {}).get("support_count", 1 if from_new else 1)),
+                "last_seen": (meta or {}).get("last_seen") or datetime.datetime.now().isoformat(timespec="seconds"),
+            })
+        else:
+            idx = seen[key]
+            merged_meta[idx] = {
+                **merged_meta[idx],
+                **(meta if isinstance(meta, dict) else {}),
+            }
+            merged_meta[idx]["support_count"] = int(merged_meta[idx].get("support_count", 0)) + 1
+            merged_meta[idx]["importance"] = max(int(merged_meta[idx].get("importance", 0)), 2 if from_new else 1)
+            merged_meta[idx]["last_seen"] = merged_meta[idx].get("last_seen") or datetime.datetime.now().isoformat(timespec="seconds")
+
+    for idx, item in enumerate(existing_list):
+        push_item(item, metadata[idx] if idx < len(metadata) else {}, from_new=False)
+    for idx, item in enumerate(new_list):
+        push_item(item, metadata[len(existing_list) + idx] if len(existing_list) + idx < len(metadata) else {}, from_new=True)
+
+    if limit is not None and len(merged_items) > limit:
+        ranked = sorted(
+            enumerate(merged_items),
+            key=lambda entry: (
+                int(merged_meta[entry[0]].get("importance", 0)),
+                int(merged_meta[entry[0]].get("support_count", 0)),
+                -entry[0],
+            ),
+            reverse=True,
+        )
+        merged_items = [entry[1] for entry in ranked[:limit]]
+    return merged_items
+
+
+def _merge_profile_scalar(existing_value, new_value):
+    existing_text = _normalize_text(existing_value)
+    new_text = _normalize_text(new_value)
+    if not new_text:
+        return existing_value
+    if not existing_text:
+        return new_text
+    return new_text
+
+
+def _merge_trait_text(existing_value, new_value, limit=200):
+    existing_text = _normalize_text(existing_value)
+    new_text = _normalize_text(new_value)
+    if not new_text:
+        return existing_text
+    if not existing_text:
+        return new_text
+    if existing_text == new_text:
+        return existing_text
+    combined = f"{existing_text} / {new_text}"
+    if len(combined) <= limit:
+        return combined
+    return combined[:limit].rsplit(" / ", 1)[0].rstrip() if " / " in combined[:limit] else combined[:limit]
 
 
 def _merge_confidence(existing_value, new_value):
@@ -922,11 +1031,459 @@ def _is_profile_diff_payload(profile):
     return isinstance(summary, dict) and "new_tensions" in summary
 
 
-def _merge_summary_from_diff(existing_profile: dict, new_profile: dict) -> dict:
+def _normalize_key(text: str) -> str:
+    text = _normalize_text(text)
+    if not text:
+        return ""
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.lower()
+
+
+def _normalize_canonical_key(canonical_key: str, fallback_text: str = "") -> str:
+    canonical_key = _normalize_text(canonical_key)
+    if canonical_key:
+        normalized = _normalize_key(canonical_key)
+        if normalized:
+            return re.sub(r"\s+", "_", normalized)
+    if fallback_text:
+        fallback = _normalize_key(fallback_text)
+        return re.sub(r"\s+", "_", fallback)
+    return ""
+
+
+def _candidate_description_key(candidate: dict) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    desc = candidate.get("description", "")
+    return _normalize_key(desc)
+
+
+def _has_shared_significant_tokens(text_a: str, text_b: str) -> bool:
+    tokens_a = [t for t in _normalize_key(text_a).split() if len(t) > 1]
+    tokens_b = [t for t in _normalize_key(text_b).split() if len(t) > 1]
+    if not tokens_a or not tokens_b:
+        return False
+
+    common = set(tokens_a) & set(tokens_b)
+    if len(common) < 2:
+        return False
+
+    generic_tokens = {
+        "好む", "好き", "する", "感じ", "感じる", "こと", "もの", "人", "な", "の", "に", "で", "と", "が", "し", "や", "ため", "よう",
+        "部分", "程度", "場合", "感じ", "また", "ほど", "より", "だけ", "ただ", "もう", "だから",
+    }
+    significant = {token for token in common if token not in generic_tokens}
+    if significant:
+        total_unique = len(set(tokens_a + tokens_b))
+        if len(significant) / max(1, total_unique) >= 0.25:
+            return True
+    return False
+
+
+def _is_similar_candidate(existing_text: str, new_text: str) -> bool:
+    existing_text = _normalize_text(existing_text)
+    new_text = _normalize_text(new_text)
+    if not existing_text or not new_text:
+        return False
+
+    existing_key = _normalize_key(existing_text)
+    new_key = _normalize_key(new_text)
+    return bool(existing_key and existing_key == new_key)
+
+
+def _find_candidate(existing_candidates, canonical_key: str, description: str):
+    canonical_key = _normalize_canonical_key(canonical_key, description)
+    if canonical_key:
+        for candidate in existing_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if _normalize_canonical_key(candidate.get("canonical_key", "")) == canonical_key:
+                return candidate
+
+    description_key = _normalize_key(description)
+    for candidate in existing_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if _normalize_key(candidate.get("description", "")) == description_key:
+            return candidate
+
+    for candidate in existing_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if _is_similar_candidate(candidate.get("description", ""), description):
+            return candidate
+
+    return None
+
+
+def _merge_evidence_list(existing_evidence, new_evidence, limit=None):
+    if not isinstance(existing_evidence, list):
+        existing_evidence = []
+    if not isinstance(new_evidence, list):
+        new_evidence = []
+    merged = []
+    seen = set()
+    for item in list(existing_evidence) + list(new_evidence):
+        item = _normalize_text(item)
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    if limit is not None and len(merged) > limit:
+        return merged[-limit:]
+    return merged
+
+
+def _merge_topic_metadata(existing_metadata: list, display_name: str, canonical_key: str, session_id: str) -> list:
+    if not isinstance(existing_metadata, list):
+        existing_metadata = []
+    display_name = _normalize_text(display_name)
+    if not display_name:
+        return existing_metadata
+    canonical_key_norm = _normalize_canonical_key(canonical_key, display_name)
+
+    for meta in existing_metadata:
+        if not isinstance(meta, dict):
+            continue
+        ck = _normalize_canonical_key(meta.get("canonical_key", ""))
+        dn = _normalize_text(meta.get("display_name", ""))
+        if (canonical_key_norm and ck == canonical_key_norm) or dn == display_name:
+            if canonical_key_norm and not meta.get("canonical_key"):
+                meta["canonical_key"] = canonical_key_norm
+            if session_id not in meta.get("evidence", []):
+                meta["support_count"] = int(meta.get("support_count", 0)) + 1
+                meta["last_seen_session_id"] = session_id
+                meta["evidence"] = _merge_evidence_list(meta.get("evidence", []), [session_id], limit=10)
+            return existing_metadata
+
+    new_meta = {
+        "canonical_key": canonical_key_norm,
+        "display_name": display_name,
+        "support_count": 1,
+        "first_seen_session_id": session_id,
+        "last_seen_session_id": session_id,
+        "evidence": [session_id],
+        "importance": 2,
+    }
+    existing_metadata.append(new_meta)
+    return existing_metadata
+
+
+def _evict_topic_metadata(metadata: list, limit: int = 30) -> list:
+    if not isinstance(metadata, list) or len(metadata) <= limit:
+        return metadata if isinstance(metadata, list) else []
+    sorted_meta = sorted(
+        (m for m in metadata if isinstance(m, dict)),
+        key=lambda m: (
+            int(m.get("importance", 0)),
+            int(m.get("support_count", 0)),
+            m.get("last_seen_session_id") or "",
+        ),
+        reverse=True,
+    )
+    return sorted_meta[:limit]
+
+
+def _trait_display_from_candidates(candidates: list, max_chars: int = 200) -> str:
+    if not isinstance(candidates, list):
+        return ""
+    valid = [
+        c for c in candidates
+        if isinstance(c, dict)
+        and c.get("status") not in {"corrected", "negated"}
+        and _normalize_text(c.get("description", ""))
+    ]
+    valid.sort(key=lambda c: int(c.get("support_count", 0)), reverse=True)
+    texts = [_normalize_text(c["description"]) for c in valid[:3]]
+    result = " / ".join(texts)
+    if len(result) > max_chars:
+        result = result[:max_chars].rsplit(" / ", 1)[0].rstrip()
+    return result
+
+
+def _normalize_reasoning_history_entry(entry, default_session_id=""):
+    if isinstance(entry, str):
+        text = _normalize_text(entry)
+        if not text:
+            return None
+        return {
+            "text": text,
+            "session_id": _normalize_text(default_session_id),
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+    if isinstance(entry, dict):
+        text = _normalize_text(entry.get("text", ""))
+        if not text:
+            return None
+        return {
+            "text": text,
+            "session_id": _normalize_text(entry.get("session_id", "")) or _normalize_text(default_session_id),
+            "created_at": _normalize_text(entry.get("created_at", "")) or datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+    return None
+
+
+def _merge_reasoning_history_entries(existing_entries, new_entries, session_id, limit=20):
+    if not isinstance(existing_entries, list):
+        existing_entries = []
+    if not isinstance(new_entries, list):
+        new_entries = []
+    merged = []
+    seen = set()
+
+    for entry in list(new_entries) + list(existing_entries):
+        normalized = _normalize_reasoning_history_entry(entry, default_session_id=session_id)
+        if not normalized:
+            continue
+        key = (normalized["text"], normalized["session_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(normalized)
+    if limit is not None and len(merged) > limit:
+        return merged[:limit]
+    return merged
+
+
+def _normalize_candidate_entry(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    normalized = {
+        "description": _normalize_text(candidate.get("description", "")),
+        "canonical_key": _normalize_canonical_key(candidate.get("canonical_key", ""), candidate.get("description", "")),
+        "status": candidate.get("status", "candidate"),
+        "support_count": int(candidate.get("support_count", 0)) if candidate.get("support_count") is not None else 0,
+        "first_seen_session_id": candidate.get("first_seen_session_id", ""),
+        "last_seen_session_id": candidate.get("last_seen_session_id", ""),
+        "evidence": _merge_profile_list(candidate.get("evidence", []), []) if isinstance(candidate.get("evidence", []), list) else [],
+        "confidence": float(candidate.get("confidence", 0.0)) if candidate.get("confidence") is not None else 0.0,
+    }
+    if normalized["support_count"] >= 2 and normalized["status"] not in {"negated", "corrected", "explicit_correction"}:
+        normalized["status"] = "stable"
+    return normalized
+
+
+def _merge_candidate_entry(existing_candidates, candidate_text, session_id, confidence, canonical_key="", correction=False, explicit_correction=False):
+    if not isinstance(existing_candidates, list):
+        existing_candidates = []
+    candidate_text = _normalize_text(candidate_text)
+    if not candidate_text:
+        return existing_candidates
+    canonical_key = _normalize_canonical_key(canonical_key, candidate_text)
+
+    for idx, candidate in enumerate(existing_candidates):
+        if not isinstance(candidate, dict):
+            continue
+        existing_candidates[idx] = _normalize_candidate_entry(candidate)
+
+    candidate = _find_candidate(existing_candidates, canonical_key, candidate_text)
+    if candidate:
+        if session_id not in candidate.get("evidence", []):
+            candidate["evidence"] = _merge_evidence_list(candidate.get("evidence", []), [session_id], limit=10)
+            candidate["last_seen_session_id"] = session_id
+            if not correction:
+                candidate["support_count"] = int(candidate.get("support_count", 0)) + 1
+        candidate["confidence"] = max(float(candidate.get("confidence", 0.0)), float(confidence or 0.0))
+        if correction:
+            candidate["status"] = "corrected"
+        if explicit_correction:
+            candidate["status"] = "explicit_correction"
+        if canonical_key and not candidate.get("canonical_key"):
+            candidate["canonical_key"] = canonical_key
+    else:
+        status = "candidate"
+        if correction:
+            status = "corrected"
+        elif explicit_correction:
+            status = "explicit_correction"
+        new_candidate = {
+            "description": candidate_text,
+            "canonical_key": canonical_key,
+            "status": status,
+            "support_count": 1,
+            "first_seen_session_id": session_id,
+            "last_seen_session_id": session_id,
+            "evidence": [session_id],
+            "confidence": float(confidence or 0.0),
+        }
+        existing_candidates.append(new_candidate)
+        candidate = new_candidate
+
+    if candidate.get("status") not in {"negated", "corrected", "explicit_correction"} and int(candidate.get("support_count", 0)) >= 2:
+        candidate["status"] = "stable"
+
+    return existing_candidates
+
+
+def _reinforce_candidate(existing_candidates: list, canonical_key: str, session_id: str, confidence: float = 0.0) -> str:
+    """
+    Reinforce an existing candidate identified by canonical_key.
+    Returns 'reinforced', 'already_done', 'skipped_status', or 'not_found'.
+    Never creates new candidates — caller handles missing-key logging.
+    """
+    if not isinstance(existing_candidates, list) or not canonical_key:
+        return "not_found"
+    norm_key = _normalize_canonical_key(canonical_key)
+    if not norm_key:
+        return "not_found"
+    for candidate in existing_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if _normalize_canonical_key(candidate.get("canonical_key", "")) != norm_key:
+            continue
+        if candidate.get("status") in {"corrected", "negated", "explicit_correction", "archived"}:
+            return "skipped_status"
+        if session_id in candidate.get("evidence", []):
+            return "already_done"
+        candidate["evidence"] = _merge_evidence_list(candidate.get("evidence", []), [session_id], limit=10)
+        candidate["last_seen_session_id"] = session_id
+        candidate["support_count"] = int(candidate.get("support_count", 0)) + 1
+        candidate["confidence"] = max(float(candidate.get("confidence", 0.0)), float(confidence or 0.0))
+        if int(candidate.get("support_count", 0)) >= 2:
+            candidate["status"] = "stable"
+        return "reinforced"
+    return "not_found"
+
+
+def _choose_summary_stable_text(existing_stable: str, candidates: list) -> str:
+    explicit = [c for c in candidates if isinstance(c, dict) and c.get("status") == "explicit_correction"]
+    if explicit:
+        descriptions = [c.get("description", "") for c in explicit if c.get("description")]
+        if descriptions:
+            return descriptions[0]
+
+    stable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("status") == "stable"]
+    if stable_candidates:
+        descriptions = [c.get("description", "") for c in stable_candidates if c.get("description")]
+        if len(descriptions) == 1:
+            return descriptions[0]
+        if len(descriptions) == 2:
+            return f"{descriptions[0]}と{descriptions[1]}"
+        if len(descriptions) >= 3:
+            return f"{descriptions[0]}、{descriptions[1]}、そして{descriptions[2]}の傾向がある。"
+    if existing_stable:
+        return existing_stable
+    return ""
+
+
+def _apply_summary_corrections(stable_candidates, corrections, session_id):
+    if not isinstance(stable_candidates, list):
+        return []
+    if not isinstance(corrections, list):
+        return stable_candidates
+
+    for correction in corrections:
+        if not isinstance(correction, dict):
+            continue
+        target_key = _normalize_canonical_key(correction.get("target_canonical_key", ""), correction.get("old_value", ""))
+        new_key = _normalize_canonical_key(correction.get("new_canonical_key", ""), correction.get("new_value", ""))
+        target_value = correction.get("old_value", "")
+        new_value = correction.get("new_value", "")
+        if not new_value:
+            continue
+
+        old_candidate = None
+        if target_key:
+            for candidate in stable_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                if _normalize_canonical_key(candidate.get("canonical_key", "")) == target_key:
+                    old_candidate = candidate
+                    break
+        if not old_candidate and target_value:
+            for candidate in stable_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                if _normalize_key(candidate.get("description", "")) == _normalize_key(target_value) or _is_similar_candidate(candidate.get("description", ""), target_value):
+                    old_candidate = candidate
+                    break
+
+        if old_candidate:
+            old_candidate["status"] = "corrected"
+            old_candidate["last_seen_session_id"] = session_id
+            old_candidate["evidence"] = _merge_evidence_list(old_candidate.get("evidence", []), [session_id], limit=10)
+
+        stable_candidates = _merge_candidate_entry(
+            stable_candidates,
+            new_value,
+            session_id,
+            0.0,
+            canonical_key=new_key,
+            correction=False,
+            explicit_correction=True,
+        )
+
+    return stable_candidates
+
+
+def _merge_summary_from_diff(existing_profile: dict, new_profile: dict, session_id: str) -> dict:
     existing_summary = normalize_summary(existing_profile.get("summary", ""))
     diff_summary = new_profile.get("summary", {}) if isinstance(new_profile.get("summary", {}), dict) else {}
-    stable_candidate = diff_summary.get("stable_candidate") or diff_summary.get("stable", "")
-    stable = _merge_profile_scalar(existing_summary.get("stable", ""), stable_candidate)
+    all_corrections = new_profile.get("corrections", []) if isinstance(new_profile.get("corrections", []), list) else []
+    # Only pass corrections that target summary fields to avoid contaminating from other field corrections
+    corrections = [
+        c for c in all_corrections
+        if isinstance(c, dict) and (
+            not _normalize_text(c.get("field", "")) or
+            "summary" in _normalize_text(c.get("field", "")).lower()
+        )
+    ]
+    stable_candidates = existing_summary.get("stable_candidates", [])
+
+    stable_candidates = [c for c in stable_candidates if isinstance(c, dict)]
+    stable_candidates = [_normalize_candidate_entry(c) for c in stable_candidates]
+
+    if corrections:
+        stable_candidates = _apply_summary_corrections(stable_candidates, corrections, session_id)
+
+    stable_candidates_inputs = diff_summary.get("stable_candidates")
+    if isinstance(stable_candidates_inputs, list):
+        for entry in stable_candidates_inputs:
+            if isinstance(entry, dict):
+                desc = entry.get("description", "")
+                key = entry.get("canonical_key", "")
+            else:
+                desc = _normalize_text(entry)
+                key = ""
+            stable_candidates = _merge_candidate_entry(
+                stable_candidates,
+                desc,
+                session_id,
+                new_profile.get("confidence", {}).get("summary", 0.0),
+                canonical_key=key,
+            )
+    else:
+        stable_candidate = diff_summary.get("stable_candidate") or diff_summary.get("stable", "")
+        if stable_candidate:
+            stable_candidates = _merge_candidate_entry(
+                stable_candidates,
+                stable_candidate,
+                session_id,
+                new_profile.get("confidence", {}).get("summary", 0.0),
+            )
+
+    # Process reinforced_candidate_keys: re-confirmation of existing candidates by canonical_key
+    reinforced_keys = diff_summary.get("reinforced_candidate_keys")
+    if isinstance(reinforced_keys, list):
+        _conf = float(new_profile.get("confidence", {}).get("summary", 0.0) if isinstance(new_profile.get("confidence"), dict) else 0.0)
+        for _rkey in reinforced_keys:
+            _rkey = (_rkey or "").strip()
+            if not _rkey:
+                continue
+            _result = _reinforce_candidate(stable_candidates, _rkey, session_id, _conf)
+            if _result == "not_found":
+                try:
+                    write_debug_log("profile_reinforcement_key_not_found", {"field": "summary", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+            elif _result == "skipped_status":
+                try:
+                    write_debug_log("profile_reinforcement_skipped_invalid_status", {"field": "summary", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+
+    stable = _choose_summary_stable_text(existing_summary.get("stable", ""), stable_candidates)
     recent = _merge_profile_scalar(existing_summary.get("recent", ""), diff_summary.get("recent", ""))
     growth = _merge_profile_scalar(existing_summary.get("growth", ""), diff_summary.get("growth", ""))
     tensions = _merge_profile_list(existing_summary.get("tensions", []), diff_summary.get("new_tensions", []), limit=15)
@@ -935,6 +1492,7 @@ def _merge_summary_from_diff(existing_profile: dict, new_profile: dict) -> dict:
         "recent": recent,
         "growth": growth,
         "tensions": tensions,
+        "stable_candidates": stable_candidates,
     }
 
 
@@ -945,10 +1503,11 @@ def normalize_summary(summary):
             "recent": summary.get("recent", ""),
             "growth": summary.get("growth", ""),
             "tensions": summary.get("tensions", []) if isinstance(summary.get("tensions", []), list) else [],
+            "stable_candidates": summary.get("stable_candidates", []) if isinstance(summary.get("stable_candidates", []), list) else [],
         }
     if isinstance(summary, str):
-        return {"stable": summary, "recent": "", "growth": "", "tensions": []}
-    return {"stable": "", "recent": "", "growth": "", "tensions": []}
+        return {"stable": summary, "recent": "", "growth": "", "tensions": [], "stable_candidates": []}
+    return {"stable": "", "recent": "", "growth": "", "tensions": [], "stable_candidates": []}
 
 
 def normalize_matching_hypothesis(mh):
@@ -958,6 +1517,8 @@ def normalize_matching_hypothesis(mh):
             "recent_good_match": "",
             "likely_bad_match": "",
             "reasoning_history": [],
+            "reasoning_history_entries": [],
+            "stable_candidates": [],
         }
     if "stable_good_match" in mh or "recent_good_match" in mh or "reasoning_history" in mh:
         return {
@@ -965,12 +1526,16 @@ def normalize_matching_hypothesis(mh):
             "recent_good_match": mh.get("recent_good_match", ""),
             "likely_bad_match": mh.get("likely_bad_match", ""),
             "reasoning_history": mh.get("reasoning_history", []) if isinstance(mh.get("reasoning_history", []), list) else [],
+            "reasoning_history_entries": mh.get("reasoning_history_entries", []) if isinstance(mh.get("reasoning_history_entries", []), list) else [],
+            "stable_candidates": mh.get("stable_candidates", []) if isinstance(mh.get("stable_candidates", []), list) else [],
         }
     return {
         "stable_good_match": mh.get("likely_good_match", ""),
         "recent_good_match": "",
         "likely_bad_match": mh.get("likely_bad_match", ""),
         "reasoning_history": [mh.get("reason", "")] if mh.get("reason") else [],
+        "reasoning_history_entries": [],
+        "stable_candidates": [],
     }
 
 
@@ -1011,8 +1576,28 @@ def get_profile_matching_good_match(profile):
     return mh.get("recent_good_match") or mh.get("stable_good_match") or mh.get("likely_good_match", "")
 
 
+def _resolve_trait_value(existing_value, new_value, corrections, field_name):
+    if not isinstance(corrections, list):
+        return _merge_trait_text(existing_value, new_value)
+    correction_fields = {
+        _normalize_text(c.get("field", "")).lower()
+        for c in corrections
+        if isinstance(c, dict) and _normalize_text(c.get("field", ""))
+    }
+    if correction_fields and (field_name in correction_fields or f"personality_traits.{field_name}" in correction_fields):
+        return _normalize_text(new_value) or existing_value
+    if correction_fields and new_value and existing_value:
+        return _normalize_text(new_value) or existing_value
+    return _merge_trait_text(existing_value, new_value)
+
+
 def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> dict:
     merged = deepcopy(existing)
+
+    _existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
+    if session_id and session_id in _existing_evidence:
+        merged["profile_version"] = PROFILE_VERSION
+        return merged
 
     merged["user_id"] = existing.get("user_id", new_profile.get("user_id", ""))
     merged["profile_version"] = PROFILE_VERSION
@@ -1021,62 +1606,281 @@ def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> d
     if _is_profile_diff_payload(new_profile):
         existing_personality = existing.get("personality_traits", {}) if isinstance(existing.get("personality_traits", {}), dict) else {}
         personality_updates = new_profile.get("personality_traits_updates", {}) if isinstance(new_profile.get("personality_traits_updates", {}), dict) else {}
+        corrections = new_profile.get("corrections", []) if isinstance(new_profile.get("corrections", []), list) else []
+
+        # Display personality_traits from string updates (backward-compatible)
         merged["personality_traits"] = {
-            "communication_style": _merge_profile_scalar(
+            "communication_style": _resolve_trait_value(
                 existing_personality.get("communication_style", ""),
                 personality_updates.get("communication_style", ""),
+                corrections,
+                "communication_style",
             ),
-            "decision_style": _merge_profile_scalar(
+            "decision_style": _resolve_trait_value(
                 existing_personality.get("decision_style", ""),
                 personality_updates.get("decision_style", ""),
+                corrections,
+                "decision_style",
             ),
-            "emotional_tendency": _merge_profile_scalar(
+            "emotional_tendency": _resolve_trait_value(
                 existing_personality.get("emotional_tendency", ""),
                 personality_updates.get("emotional_tendency", ""),
+                corrections,
+                "emotional_tendency",
             ),
         }
 
+        # Process personality_trait_candidates from diff
+        existing_ptc = existing.get("personality_trait_candidates", {})
+        if not isinstance(existing_ptc, dict):
+            existing_ptc = {}
+        new_ptc = new_profile.get("personality_trait_candidates", {})
+        if not isinstance(new_ptc, dict):
+            new_ptc = {}
+
+        _conf_summary = float(new_profile.get("confidence", {}).get("summary", 0.0) if isinstance(new_profile.get("confidence"), dict) else 0.0)
+        merged_ptc = {
+            "communication_style": list(existing_ptc.get("communication_style") or []),
+            "decision_style": list(existing_ptc.get("decision_style") or []),
+            "emotional_tendency": list(existing_ptc.get("emotional_tendency") or []),
+        }
+        for _field in ["communication_style", "decision_style", "emotional_tendency"]:
+            for _entry in (new_ptc.get(_field) or []):
+                if not isinstance(_entry, dict):
+                    continue
+                _desc = _normalize_text(_entry.get("description", ""))
+                _key = _entry.get("canonical_key", "")
+                if not _desc:
+                    continue
+                merged_ptc[_field] = _merge_candidate_entry(
+                    merged_ptc[_field], _desc, session_id, _conf_summary, canonical_key=_key,
+                )
+            # Apply corrections to personality_trait_candidates
+            for _corr in corrections:
+                if not isinstance(_corr, dict):
+                    continue
+                _field_raw = _normalize_text(_corr.get("field", "")).lower()
+                if _field not in _field_raw and f"personality_traits.{_field}" not in _field_raw:
+                    continue
+                _target_key = _normalize_canonical_key(_corr.get("target_canonical_key", ""), _corr.get("old_value", ""))
+                _old_val_key = _normalize_key(_corr.get("old_value", ""))
+                for _c in merged_ptc[_field]:
+                    if not isinstance(_c, dict):
+                        continue
+                    _ck = _normalize_canonical_key(_c.get("canonical_key", ""))
+                    if (_target_key and _ck == _target_key) or (_old_val_key and _normalize_key(_c.get("description", "")) == _old_val_key):
+                        _c["status"] = "corrected"
+                        _c["last_seen_session_id"] = session_id
+                        _c["evidence"] = _merge_evidence_list(_c.get("evidence", []), [session_id], limit=10)
+                        break
+                _new_val = _normalize_text(_corr.get("new_value", ""))
+                _new_key = _normalize_canonical_key(_corr.get("new_canonical_key", ""), _new_val)
+                if _new_val:
+                    merged_ptc[_field] = _merge_candidate_entry(
+                        merged_ptc[_field], _new_val, session_id, 0.0, canonical_key=_new_key, explicit_correction=True,
+                    )
+
+        # Process personality_trait_reinforced_keys
+        ptc_reinforced = new_profile.get("personality_trait_reinforced_keys", {})
+        if isinstance(ptc_reinforced, dict):
+            for _field in ["communication_style", "decision_style", "emotional_tendency"]:
+                for _rkey in (ptc_reinforced.get(_field) or []):
+                    _rkey = (_rkey or "").strip()
+                    if not _rkey:
+                        continue
+                    _result = _reinforce_candidate(merged_ptc[_field], _rkey, session_id, _conf_summary)
+                    if _result == "not_found":
+                        try:
+                            write_debug_log("profile_reinforcement_key_not_found", {"field": f"personality_trait_candidates.{_field}", "canonical_key": _rkey, "session_id": session_id})
+                        except Exception:
+                            pass
+                    elif _result == "skipped_status":
+                        try:
+                            write_debug_log("profile_reinforcement_skipped_invalid_status", {"field": f"personality_trait_candidates.{_field}", "canonical_key": _rkey, "session_id": session_id})
+                        except Exception:
+                            pass
+
+        merged["personality_trait_candidates"] = merged_ptc
+
+        # Override display personality_traits from candidates when available
+        for _field in ["communication_style", "decision_style", "emotional_tendency"]:
+            _display = _trait_display_from_candidates(merged_ptc.get(_field, []))
+            if _display:
+                merged["personality_traits"][_field] = _display
+
         merged["values"] = _merge_profile_list(existing.get("values", []), new_profile.get("new_values", []), limit=10)
 
+        # Conversation topics with persistent metadata
         existing_preferences = existing.get("preferences", {}) if isinstance(existing.get("preferences", {}), dict) else {}
         preference_updates = new_profile.get("preference_updates", {}) if isinstance(new_profile.get("preference_updates", {}), dict) else {}
+
+        existing_topic_meta = existing_preferences.get("conversation_topic_metadata", [])
+        if not isinstance(existing_topic_meta, list):
+            existing_topic_meta = []
+
+        # Build stubs from existing topics if no metadata yet (backward compat)
+        if not existing_topic_meta:
+            for _t in (existing_preferences.get("conversation_topics") or []):
+                _t_str = _normalize_text(_t)
+                if _t_str:
+                    existing_topic_meta.append({
+                        "canonical_key": _normalize_canonical_key("", _t_str),
+                        "display_name": _t_str,
+                        "support_count": 1,
+                        "first_seen_session_id": "",
+                        "last_seen_session_id": "",
+                        "evidence": [],
+                        "importance": 1,
+                    })
+
+        updated_topic_meta = [dict(m) for m in existing_topic_meta if isinstance(m, dict)]
+        new_topics_from_diff = preference_updates.get("new_conversation_topics", [])
+        if not isinstance(new_topics_from_diff, list):
+            new_topics_from_diff = []
+        for _te in new_topics_from_diff:
+            if isinstance(_te, dict):
+                _td = _normalize_text(_te.get("description", ""))
+                _tk = _te.get("canonical_key", "")
+            elif isinstance(_te, str):
+                _td = _normalize_text(_te)
+                _tk = ""
+            else:
+                continue
+            if not _td:
+                continue
+            updated_topic_meta = _merge_topic_metadata(updated_topic_meta, _td, _tk, session_id)
+
+        updated_topic_meta = _evict_topic_metadata(updated_topic_meta, limit=30)
+
         merged["preferences"] = {
             "relationship_style": _merge_profile_scalar(
                 existing_preferences.get("relationship_style", ""),
                 preference_updates.get("relationship_style", ""),
             ),
-            "conversation_topics": _merge_profile_list(
-                existing_preferences.get("conversation_topics", []),
-                preference_updates.get("new_conversation_topics", []),
-                limit=30,
-            ),
+            "conversation_topics": [m.get("display_name", "") for m in updated_topic_meta if isinstance(m, dict) and m.get("display_name")],
             "dislikes": _merge_profile_list(
                 existing_preferences.get("dislikes", []),
                 preference_updates.get("new_dislikes", []),
                 limit=15,
             ),
+            "conversation_topic_metadata": updated_topic_meta,
         }
 
         existing_mh = normalize_matching_hypothesis(existing.get("matching_hypothesis", {}))
         mh_updates = new_profile.get("matching_hypothesis_updates", {}) if isinstance(new_profile.get("matching_hypothesis_updates", {}), dict) else {}
+        matching_candidates = existing_mh.get("stable_candidates", []) if isinstance(existing_mh.get("stable_candidates", []), list) else []
+        matching_candidates = [_normalize_candidate_entry(c) for c in matching_candidates if isinstance(c, dict)]
+
+        _mh_conf = float(new_profile.get("confidence", {}).get("matching_hypothesis", 0.0) if isinstance(new_profile.get("confidence"), dict) else 0.0)
+        stable_candidate_entries = mh_updates.get("stable_good_match_candidates", []) if isinstance(mh_updates.get("stable_good_match_candidates", []), list) else []
+        for entry in stable_candidate_entries:
+            if not isinstance(entry, dict):
+                continue
+            matching_candidates = _merge_candidate_entry(
+                matching_candidates,
+                entry.get("description", ""),
+                session_id,
+                _mh_conf,
+                canonical_key=entry.get("canonical_key", ""),
+            )
+
+        # Process reinforced_stable_good_match_candidate_keys
+        mh_reinforced_keys = mh_updates.get("reinforced_stable_good_match_candidate_keys", [])
+        if not isinstance(mh_reinforced_keys, list):
+            mh_reinforced_keys = []
+        for _rkey in mh_reinforced_keys:
+            _rkey = (_rkey or "").strip()
+            if not _rkey:
+                continue
+            _result = _reinforce_candidate(matching_candidates, _rkey, session_id, _mh_conf)
+            if _result == "not_found":
+                try:
+                    write_debug_log("profile_reinforcement_key_not_found", {"field": "matching_hypothesis", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+            elif _result == "skipped_status":
+                try:
+                    write_debug_log("profile_reinforcement_skipped_invalid_status", {"field": "matching_hypothesis", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+
+        # Apply corrections to matching_hypothesis candidates
+        for _corr in corrections:
+            if not isinstance(_corr, dict):
+                continue
+            _field_raw = _normalize_text(_corr.get("field", "")).lower()
+            if not ("matching_hypothesis" in _field_raw or "good_match" in _field_raw):
+                continue
+            _target_key = _normalize_canonical_key(_corr.get("target_canonical_key", ""), _corr.get("old_value", ""))
+            _old_val_key = _normalize_key(_corr.get("old_value", ""))
+            for _mc in matching_candidates:
+                if not isinstance(_mc, dict):
+                    continue
+                _ck = _normalize_canonical_key(_mc.get("canonical_key", ""))
+                if (_target_key and _ck == _target_key) or (_old_val_key and _normalize_key(_mc.get("description", "")) == _old_val_key):
+                    _mc["status"] = "corrected"
+                    _mc["last_seen_session_id"] = session_id
+                    _mc["evidence"] = _merge_evidence_list(_mc.get("evidence", []), [session_id], limit=10)
+                    break
+            _new_val = _normalize_text(_corr.get("new_value", ""))
+            _new_key = _normalize_canonical_key(_corr.get("new_canonical_key", ""), _new_val)
+            if _new_val:
+                matching_candidates = _merge_candidate_entry(
+                    matching_candidates, _new_val, session_id, 0.0, canonical_key=_new_key, explicit_correction=True,
+                )
+
+        stable_good_match = existing_mh.get("stable_good_match", "")
+        if mh_updates.get("recent_good_match"):
+            recent_good_match = mh_updates.get("recent_good_match")
+        else:
+            recent_good_match = existing_mh.get("recent_good_match", "")
+
+        # explicit_correction takes priority for stable_good_match
+        _explicit_mh = [c for c in matching_candidates if isinstance(c, dict) and c.get("status") == "explicit_correction"]
+        if _explicit_mh:
+            stable_good_match = _explicit_mh[0].get("description", "")
+        else:
+            # Clear stable_good_match if its candidate is now corrected
+            if stable_good_match:
+                _sgm_corrected = next(
+                    (c for c in matching_candidates if isinstance(c, dict) and c.get("description") == stable_good_match and c.get("status") in {"corrected", "negated"}),
+                    None,
+                )
+                if _sgm_corrected:
+                    stable_good_match = ""
+            # Promote newly stable candidates (support_count >= 2) — includes new entries and reinforced keys
+            _promoted_keys_to_check = set()
+            for entry in stable_candidate_entries:
+                if isinstance(entry, dict):
+                    _promoted_keys_to_check.add(_normalize_canonical_key(entry.get("canonical_key", ""), entry.get("description", "")))
+            for _rkey in mh_reinforced_keys:
+                _rk = _normalize_canonical_key((_rkey or "").strip())
+                if _rk:
+                    _promoted_keys_to_check.add(_rk)
+            for _pk in _promoted_keys_to_check:
+                _ce = next(
+                    (c for c in matching_candidates if isinstance(c, dict) and _normalize_canonical_key(c.get("canonical_key", "")) == _pk),
+                    None,
+                )
+                if _ce and _ce.get("status") == "stable" and _ce.get("support_count", 0) >= 2:
+                    stable_good_match = _ce.get("description", "")
+                    break
+
         merged["matching_hypothesis"] = {
-            "stable_good_match": _merge_profile_scalar(
-                existing_mh.get("stable_good_match", ""),
-                mh_updates.get("stable_good_match_candidate", ""),
-            ),
-            "recent_good_match": _merge_profile_scalar(
-                existing_mh.get("recent_good_match", ""),
-                mh_updates.get("recent_good_match", ""),
-            ),
+            "stable_good_match": stable_good_match,
+            "recent_good_match": recent_good_match,
             "likely_bad_match": _merge_profile_scalar(
                 existing_mh.get("likely_bad_match", ""),
                 mh_updates.get("likely_bad_match", ""),
             ),
-            "reasoning_history": _merge_profile_list(
-                existing_mh.get("reasoning_history", []),
+            "reasoning_history": existing_mh.get("reasoning_history", []) if isinstance(existing_mh.get("reasoning_history", []), list) else [],
+            "reasoning_history_entries": _merge_reasoning_history_entries(
+                existing_mh.get("reasoning_history_entries", []),
                 mh_updates.get("new_reasons", []),
+                session_id,
                 limit=20,
             ),
+            "stable_candidates": matching_candidates,
         }
 
         merged["confidence"] = {
@@ -1094,18 +1898,18 @@ def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> d
             ),
         }
 
-        merged["summary"] = _merge_summary_from_diff(existing, new_profile)
+        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id)
     else:
         merged["personality_traits"] = {
-            "communication_style": _merge_profile_scalar(
+            "communication_style": _merge_trait_text(
                 existing.get("personality_traits", {}).get("communication_style", ""),
                 new_profile.get("personality_traits", {}).get("communication_style", ""),
             ),
-            "decision_style": _merge_profile_scalar(
+            "decision_style": _merge_trait_text(
                 existing.get("personality_traits", {}).get("decision_style", ""),
                 new_profile.get("personality_traits", {}).get("decision_style", ""),
             ),
-            "emotional_tendency": _merge_profile_scalar(
+            "emotional_tendency": _merge_trait_text(
                 existing.get("personality_traits", {}).get("emotional_tendency", ""),
                 new_profile.get("personality_traits", {}).get("emotional_tendency", ""),
             ),
@@ -1181,29 +1985,10 @@ def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> d
             new_profile.get("uncertainties", []),
         )
 
-        existing_summary = normalize_summary(existing.get("summary", ""))
-        new_summary = normalize_summary(new_profile.get("summary", ""))
-
-        merged_summary_stable = existing_summary["stable"] or new_summary["stable"]
-        merged_summary_recent = new_summary["recent"] or (new_summary["stable"] if existing_summary["stable"] and new_summary["stable"] != existing_summary["stable"] else "")
-        merged_summary_growth = new_summary["growth"]
-        if not merged_summary_growth and existing_summary["stable"] and new_summary["stable"] and new_summary["stable"] != existing_summary["stable"]:
-            merged_summary_growth = "今回の会話で以前の理解が深まり、より具体的な特徴がわかりました。"
-
-        merged_summary_tensions = _merge_profile_list(existing_summary["tensions"], new_summary["tensions"], limit=15)
-
-        merged["summary"] = {
-            "stable": merged_summary_stable,
-            "recent": merged_summary_recent,
-            "growth": merged_summary_growth,
-            "tensions": merged_summary_tensions,
-        }
+        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id)
 
     existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
-    merged_evidence = list(existing_evidence)
-    if session_id not in merged_evidence:
-        merged_evidence.append(session_id)
-    merged["evidence"] = _merge_profile_list(merged_evidence, [], limit=10)
+    merged["evidence"] = _merge_evidence_list(existing_evidence, [session_id], limit=10)
 
     merged["profile_update_count"] = max(
         int(existing.get("profile_update_count", 0)),
@@ -1332,6 +2117,12 @@ def extract_fairy_profile(
 def update_fairy_profile(user_id: str, chat_history: list, session_id: str) -> bool:
     try:
         existing = load_user_profile(user_id)
+
+        _ev = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
+        if session_id in _ev:
+            write_debug_log("profile_update_skipped_duplicate_session", {"user_id": user_id, "session_id": session_id})
+            return True
+
         backup_saved = save_user_profile_history(existing.get("user_id", user_id), existing, session_id)
         if not backup_saved:
             write_debug_log("user_profile_history_backup_failed", {"user_id": user_id})

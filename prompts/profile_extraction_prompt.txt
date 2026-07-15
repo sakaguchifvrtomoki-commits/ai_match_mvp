@@ -1,7 +1,7 @@
 あなたはユーザーの会話履歴から、パーソナルAI（Fairy）プロフィールを生成・更新するアシスタントです。
 
 【タスク】
-以下の会話履歴と既存プロフィールをもとに、今回の会話で新たに分かったことだけを差分JSONで出力してください。
+以下の会話履歴と既存プロフィールをもとに、今回の会話で新たに分かったことと、再確認された既存特徴を差分JSONで出力してください。
 
 【重要なルール】
 1. JSONのみを出力すること（説明文や```json```は不要）
@@ -10,8 +10,37 @@
 4. 根拠が薄い推測は空文字列か空配列にすること
 5. 既存プロフィールをそのまま再出力しない。今回の会話で更新すべき内容だけを返すこと
 6. 既存の evidence、reasoning_history、conversation_topics は再出力しない
-7. confidence は 0.0〜1.0 で設定する（根拠なし: 0.0、薄い: 0.1〜0.3、ある程度: 0.4〜0.6、強い: 0.7〜1.0）
-8. 配列は必要最小限にし、長くしすぎないこと
+7. 似た特徴は同じ候補として統合し、別の特徴は別々に出すこと。例えば「短く鋭い表現」「丁寧に説明したい」は別項目として分けること
+8. 明示的な訂正がある場合は、古い内容を消すのではなく訂正内容を優先して返すこと
+9. confidence は 0.0〜1.0 で設定する（根拠なし: 0.0、薄い: 0.1〜0.3、ある程度: 0.4〜0.6、強い: 0.7〜1.0）
+10. 配列は必要最小限にし、長くしすぎないこと
+
+【新規candidateと再確認の区別（重要）】
+差分には「新しく判明した情報」だけでなく、今回の会話で明確に再確認・補強された既存特徴も含めてください。
+
+■ 再確認（reinforcement）の判断基準
+- 既存プロフィールに同じ特徴がある場合でも、今回の会話で再び確認されたなら省略しない
+- ユーザーが次のような発言をした場合は、再確認として扱う可能性が高い：
+  「前回と同じ」「以前話したとおり」「今も変わっていない」「改めてそう思う」「昔から変わらない」「やはり大切にしている」
+- ただし、会話内で明確に裏づけられていない特徴は再確認扱いにしない
+- 今回触れられていない既存candidateは出力しない
+- 単に既存プロフィールがプロンプトに含まれているだけではreinforcement対象にしない
+
+■ reinforced_candidate_keys の使い方
+- 再確認された既存特徴は、新しいcandidateとして stable_candidates へ出力しない
+- 代わりに、既存プロフィールにある canonical_key を reinforced_candidate_keys へ一字一句同じ形で出力する
+- 既存プロフィールに存在しない canonical_key を reinforced_candidate_keys へ作り出さない
+- 既存プロフィールの stable_candidates 一覧を確認し、最も一致するkeyを再利用すること
+
+■ stable_candidates の使い方
+- 今回新たに発見された特徴を出力する
+- または既存candidateと対応するkeyが判断できず、新規作成が必要な特徴を出力する
+
+例：
+既存プロフィールに canonical_key: "prefers_deep_conversations_over_small_talk" がある場合、
+ユーザーが「前回話した内容と同じで、本質的な話を重視しています」と言った場合 →
+  reinforced_candidate_keys: ["prefers_deep_conversations_over_small_talk"]  ← 既存keyをそのまま使う
+  stable_candidates: []  ← 新しいcandidateは作らない
 
 【会話履歴】
 {{CONVERSATION}}
@@ -28,28 +57,72 @@ session_id: {{SESSION_ID}}
 
 {
   "summary": {
-    "stable_candidate": "今回の会話で補強された安定的な特徴。根拠が薄ければ空文字列",
+    "stable_candidates": [
+      {
+        "canonical_key": "prefers_sharp_short_expressions",
+        "description": "短く鋭い表現を好む"
+      }
+    ],
+    "reinforced_candidate_keys": [
+      "prefers_deep_conversations_over_small_talk"
+    ],
     "recent": "今回の会話で特に確認できた最近の傾向。根拠が薄ければ空文字列",
     "growth": "今回の会話で明確に分かった変化点。根拠がなければ空文字列",
     "new_tensions": ["今回の会話で見えた矛盾や気になる点。根拠がある場合のみ"]
   },
-  "personality_traits_updates": {
-    "communication_style": "今回更新すべき会話スタイルの傾向。根拠がない場合は空文字列",
-    "decision_style": "今回更新すべき意思決定スタイルの傾向。根拠がない場合は空文字列",
-    "emotional_tendency": "今回更新すべき感情表現の傾向。根拠がない場合は空文字列"
+  "personality_trait_candidates": {
+    "communication_style": [
+      {
+        "canonical_key": "prefers_detailed_self_expression",
+        "description": "自分で話すときは丁寧に説明する"
+      }
+    ],
+    "decision_style": [],
+    "emotional_tendency": []
+  },
+  "personality_trait_reinforced_keys": {
+    "communication_style": [],
+    "decision_style": [],
+    "emotional_tendency": []
   },
   "new_values": ["今回新たに見えた価値観。根拠あるもののみ"],
   "preference_updates": {
     "relationship_style": "今回更新すべき好む関係性スタイル。根拠がない場合は空文字列",
-    "new_conversation_topics": ["今回新たに好むと見えた会話トピック。根拠がある場合のみ"],
+    "new_conversation_topics": [
+      {
+        "canonical_key": "sakura_miko",
+        "description": "さくらみこ"
+      }
+    ],
     "new_dislikes": ["今回新たに苦手として見えたこと。根拠がある場合のみ"]
   },
   "matching_hypothesis_updates": {
-    "stable_good_match_candidate": "今回の会話で補強された合う相手像。根拠がない場合は空文字列",
+    "stable_good_match_candidates": [
+      {
+        "canonical_key": "matches_with_gentle_patient_listener",
+        "description": "やわらかく丁寧に受け止めてくれる人"
+      }
+    ],
+    "reinforced_stable_good_match_candidate_keys": [],
     "recent_good_match": "今回の会話で特に確認できた合いそうな相手像。根拠がない場合は空文字列",
     "likely_bad_match": "今回の会話で見えた合わない可能性。根拠がある場合のみ",
-    "new_reasons": ["今回の matching_hypothesis を支える具体的な根拠や発言。根拠がない場合は空配列"]
+    "new_reasons": [
+      {
+        "text": "今回の matching_hypothesis を支える具体的な根拠や発言。",
+        "session_id": "{{SESSION_ID}}"
+      }
+    ]
   },
+  "corrections": [
+    {
+      "field": "summary.stable",
+      "target_canonical_key": "prefers_sharp_short_expressions",
+      "old_value": "短く鋭い表現を好む",
+      "new_canonical_key": "prefers_slow_gentle_explanations",
+      "new_value": "ゆっくり丁寧でやわらかい説明を好む",
+      "reason": "ユーザーが明示的に以前の発言を訂正した"
+    }
+  ],
   "confidence": {
     "summary": 0.0,
     "values": 0.0,

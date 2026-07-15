@@ -6,7 +6,7 @@ AIとの会話を通じてユーザーの性格・価値観・関心を分析し
 
 ## 現在のバージョン
 
-**v0.1.2**
+**v0.1.3**
 
 ## 主な機能
 
@@ -29,17 +29,21 @@ AIとの会話を通じてユーザーの性格・価値観・関心を分析し
 - PC向けデバッグ表示
 - エラー時のフォールバック処理
 
-## v0.1.2の主な変更
+## v0.1.3の主な変更
 
-- 初回メッセージを固定文からAI生成の挨拶へ変更
-- 新しい会話セッションごとに異なる挨拶を生成
-- 同一セッション内では生成済みの挨拶を再利用
-- 名前で呼びかける場合は、現段階では「マスターさん」を使用
-- 初回挨拶の生成にはFairyプロフィールを使用しない
-- APIエラーや不正な出力が発生した場合は固定文へフォールバック
-- 将来、アカウントのニックネームへ差し替えやすい構造を採用
-- Fairyの記憶処理を `fairy_memory.py` へ分離
-- 関連するテストコードを追加
+- candidateを `canonical_key`（snake_case英語キー）単位で管理し、セッション横断で同一概念を正確に統合
+- 1セッションから複数のcandidateを独立して抽出・管理可能
+- `support_count` が2以上かつ同一 `canonical_key` が複数セッションで確認された場合のみ stable に昇格
+- 明示的な訂正（`corrections`）を処理し、旧candidateをcorrected状態に移行、新candidateを生成
+- `stable_good_match` も同様のcandidate管理と昇格ルールで更新
+- `personality_trait_candidates` をフィールドごとにcandidate管理し、display文字列を自動生成（上限200文字）
+- `conversation_topic_metadata` をセッション横断で蓄積し、重要度・support_countによる上限30件の自動eviction
+- `reasoning_history_entries` に session_id を追加し、最新エントリを先頭に保持（上限20件、古いものを自動削除）
+- プロフィール更新をsession_id単位で冪等化（同一セッションの再適用は変更なし）
+- evidenceリストを最新10件で管理（古いものを自動削除）
+- 既存candidateが別セッションで再確認された場合、AIは既存canonical_keyを `reinforced_candidate_keys` として返し、support_countとevidenceを更新する。同じ特徴が2つの異なるセッションで確認されると、candidateはstableへ昇格する
+- 同様の仕組みを `matching_hypothesis`（`reinforced_stable_good_match_candidate_keys`）と `personality_traits`（`personality_trait_reinforced_keys`）にも適用
+- 差分マージの回帰テストを52件追加（v0.1.3合計57件）、reinforcement系テストを23件追加（合計80件）
 
 ## バージョン履歴
 
