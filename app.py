@@ -4,8 +4,10 @@ import html as html_lib
 import json
 import math
 import os
+import re
 import traceback
 import uuid
+from copy import deepcopy
 from pathlib import Path
 
 import streamlit as st
@@ -16,10 +18,12 @@ from googleapiclient.discovery import build
 from dotenv import load_dotenv
 from googleapiclient.http import MediaFileUpload
 from openai import OpenAI
+from fairy_memory import build_fairy_memory_context, categorize_profile_interests
 
 load_dotenv()
 
-APP_VERSION = "0.0.4"
+APP_VERSION = "0.1.3"
+PROFILE_VERSION = "0.1.3"
 
 GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeEl3FGWUk_-B7CtGLBOq1YNeeRNcClNibd-8ikF_Weh6rE9A/viewform"
 
@@ -27,6 +31,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
 OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 GOOGLE_DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+# Default display name placeholder (centralized for easy future replacement)
+DEFAULT_DISPLAY_NAME = "マスターさん"
 
 
 def get_openai_client():
@@ -686,6 +693,9 @@ def write_debug_log(event: str, data=None):
             "session_id": get_or_create_session_id(),
             "event": event,
         }
+        uid = st.session_state.get("user_id")
+        if uid:
+            entry["user_id"] = uid
         if data is not None:
             entry["data"] = data
         with open(paths["debug_file"], "a", encoding="utf-8") as f:
@@ -710,31 +720,1492 @@ def write_error_log(event: str, error_message: str, data=None):
     except Exception:
         st.warning("エラーログの書き込みに失敗しました（アプリの動作には影響しません）。")
 
-def get_google_drive_service():
-    """Streamlit Secrets のOAuth情報から Google Drive API クライアントを作る。"""
+def sanitize_user_id(user_id: str) -> str:
+    import re
+    return re.sub(r"[^a-zA-Z0-9_\-]", "_", str(user_id))[:64]
+
+
+def initialize_user_id() -> str:
+    params = st.query_params
+    if "user_id" in params:
+        uid = sanitize_user_id(params["user_id"])
+        st.session_state.user_id = uid
+        write_debug_log("user_id_initialized", {
+            "level": "INFO",
+            "message": "user_id was initialized from URL query parameter",
+            "user_id": uid,
+            "session_id": st.session_state.get("session_id", ""),
+        })
+        return uid
+
+    existing = st.session_state.get("user_id")
+    if existing:
+        write_debug_log("user_id_initialized", {
+            "level": "INFO",
+            "message": "user_id was reused from session state",
+            "user_id": existing,
+            "session_id": st.session_state.get("session_id", ""),
+        })
+        return existing
+
+    uid = f"user_{uuid.uuid4().hex[:12]}"
+    st.session_state.user_id = uid
+    write_debug_log("user_id_initialized", {
+        "level": "INFO",
+        "message": "user_id was generated automatically",
+        "user_id": uid,
+        "session_id": st.session_state.get("session_id", ""),
+    })
+    return uid
+
+
+def get_or_create_user_id() -> str:
+    return initialize_user_id()
+
+
+def get_user_profiles_dir() -> Path:
+    d = Path(__file__).parent / "user_profiles"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def get_user_profile_path(user_id: str) -> Path:
+    return get_user_profiles_dir() / f"{user_id}.json"
+
+
+def _empty_profile(user_id: str) -> dict:
+    return {
+        "user_id": user_id,
+        "profile_update_count": 0,
+        "first_created_at": "",
+        "updated_at": "",
+        "profile_version": PROFILE_VERSION,
+        "summary": {
+            "stable": "",
+            "recent": "",
+            "growth": "",
+            "tensions": [],
+            "stable_candidates": [],
+        },
+        "personality_traits": {
+            "communication_style": "",
+            "decision_style": "",
+            "emotional_tendency": "",
+        },
+        "personality_trait_candidates": {
+            "communication_style": [],
+            "decision_style": [],
+            "emotional_tendency": [],
+        },
+        "values": [],
+        "preferences": {
+            "relationship_style": "",
+            "conversation_topics": [],
+            "conversation_topic_metadata": [],
+            "dislikes": [],
+        },
+        "matching_hypothesis": {
+            "stable_good_match": "",
+            "recent_good_match": "",
+            "likely_bad_match": "",
+            "reasoning_history": [],
+            "reasoning_history_entries": [],
+            "stable_candidates": [],
+        },
+        "confidence": {
+            "summary": 0.0,
+            "values": 0.0,
+            "matching_hypothesis": 0.0,
+        },
+        "memory_notes": [],
+        "uncertainties": [],
+        "evidence": [],
+    }
+
+
+def load_user_profile(user_id: str) -> dict:
+    path = get_user_profile_path(user_id)
+    if not path.exists():
+        return _empty_profile(user_id)
     try:
-        if "google_oauth" not in st.secrets:
-            st.session_state.last_drive_upload_error = "google_oauth が Streamlit Secrets に設定されていません。"
-            write_error_log("google_drive_oauth_missing", "google_oauth is missing in Streamlit Secrets")
+        with open(path, encoding="utf-8") as f:
+            profile = json.load(f)
+        if not isinstance(profile, dict):
+            raise ValueError("プロフィールが辞書型ではありません")
+        profile["summary"] = normalize_summary(profile.get("summary", ""))
+        profile["matching_hypothesis"] = normalize_matching_hypothesis(profile.get("matching_hypothesis", {}))
+        if not isinstance(profile.get("personality_trait_candidates", {}), dict):
+            profile["personality_trait_candidates"] = {
+                "communication_style": [],
+                "decision_style": [],
+                "emotional_tendency": [],
+            }
+        else:
+            for key in ["communication_style", "decision_style", "emotional_tendency"]:
+                if key not in profile["personality_trait_candidates"] or not isinstance(profile["personality_trait_candidates"][key], list):
+                    profile["personality_trait_candidates"][key] = []
+        preferences = profile.get("preferences", {}) if isinstance(profile.get("preferences", {}), dict) else {}
+        if not isinstance(preferences.get("conversation_topic_metadata", []), list):
+            preferences["conversation_topic_metadata"] = []
+        profile["preferences"] = preferences
+        mh = profile.get("matching_hypothesis", {}) if isinstance(profile.get("matching_hypothesis", {}), dict) else {}
+        if not isinstance(mh.get("reasoning_history_entries", []), list):
+            mh["reasoning_history_entries"] = []
+        if not isinstance(mh.get("stable_candidates", []), list):
+            mh["stable_candidates"] = []
+        profile["matching_hypothesis"] = mh
+        return profile
+    except Exception as e:
+        try:
+            backup_path = path.with_suffix(
+                f".{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
+            )
+            path.rename(backup_path)
+        except Exception:
+            pass
+        write_debug_log("user_profile_load_failed", {"user_id": user_id, "error": str(e)})
+        return _empty_profile(user_id)
+
+
+def save_user_profile(user_id: str, profile: dict) -> bool:
+    try:
+        path = get_user_profile_path(user_id)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        write_debug_log("user_profile_save_failed", {"user_id": user_id, "error": str(e)})
+        return False
+
+
+def get_user_profile_history_dir() -> Path:
+    d = get_user_profiles_dir() / "history"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def save_user_profile_history(user_id: str, profile: dict, session_id: str) -> bool:
+    try:
+        history_dir = get_user_profile_history_dir()
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{user_id}_{timestamp}_{session_id}.json"
+        path = history_dir / filename
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(profile, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        write_debug_log("user_profile_history_save_failed", {"user_id": user_id, "error": str(e)})
+        return False
+
+
+def _normalize_text(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _merge_profile_list(existing_list, new_list, limit=None):
+    if not isinstance(existing_list, list):
+        existing_list = []
+    if not isinstance(new_list, list):
+        new_list = []
+
+    merged = []
+    seen = set()
+    for item in list(existing_list) + list(new_list):
+        if item is None:
+            continue
+        normalized = _normalize_text(item)
+        if not normalized:
+            continue
+        if normalized not in seen:
+            seen.add(normalized)
+            merged.append(item if not isinstance(item, str) else normalized)
+    if limit is not None:
+        return merged[:limit]
+    return merged
+
+
+def _merge_profile_list_with_priority(existing_list, new_list, limit=None, metadata=None):
+    if not isinstance(existing_list, list):
+        existing_list = []
+    if not isinstance(new_list, list):
+        new_list = []
+    if not isinstance(metadata, list):
+        metadata = []
+
+    merged_items = []
+    merged_meta = []
+    seen = {}
+
+    def push_item(item, meta, from_new=False):
+        if item is None:
+            return
+        normalized = _normalize_text(item)
+        if not normalized:
+            return
+        key = normalized.lower()
+        if key not in seen:
+            seen[key] = len(merged_items)
+            merged_items.append(normalized)
+            merged_meta.append({
+                **(meta if isinstance(meta, dict) else {}),
+                "importance": int((meta or {}).get("importance", 1 if not from_new else 2)),
+                "support_count": int((meta or {}).get("support_count", 1 if from_new else 1)),
+                "last_seen": (meta or {}).get("last_seen") or datetime.datetime.now().isoformat(timespec="seconds"),
+            })
+        else:
+            idx = seen[key]
+            merged_meta[idx] = {
+                **merged_meta[idx],
+                **(meta if isinstance(meta, dict) else {}),
+            }
+            merged_meta[idx]["support_count"] = int(merged_meta[idx].get("support_count", 0)) + 1
+            merged_meta[idx]["importance"] = max(int(merged_meta[idx].get("importance", 0)), 2 if from_new else 1)
+            merged_meta[idx]["last_seen"] = merged_meta[idx].get("last_seen") or datetime.datetime.now().isoformat(timespec="seconds")
+
+    for idx, item in enumerate(existing_list):
+        push_item(item, metadata[idx] if idx < len(metadata) else {}, from_new=False)
+    for idx, item in enumerate(new_list):
+        push_item(item, metadata[len(existing_list) + idx] if len(existing_list) + idx < len(metadata) else {}, from_new=True)
+
+    if limit is not None and len(merged_items) > limit:
+        ranked = sorted(
+            enumerate(merged_items),
+            key=lambda entry: (
+                int(merged_meta[entry[0]].get("importance", 0)),
+                int(merged_meta[entry[0]].get("support_count", 0)),
+                -entry[0],
+            ),
+            reverse=True,
+        )
+        merged_items = [entry[1] for entry in ranked[:limit]]
+    return merged_items
+
+
+def _merge_profile_scalar(existing_value, new_value):
+    existing_text = _normalize_text(existing_value)
+    new_text = _normalize_text(new_value)
+    if not new_text:
+        return existing_value
+    if not existing_text:
+        return new_text
+    return new_text
+
+
+def _merge_trait_text(existing_value, new_value, limit=200):
+    existing_text = _normalize_text(existing_value)
+    new_text = _normalize_text(new_value)
+    if not new_text:
+        return existing_text
+    if not existing_text:
+        return new_text
+    if existing_text == new_text:
+        return existing_text
+    combined = f"{existing_text} / {new_text}"
+    if len(combined) <= limit:
+        return combined
+    return combined[:limit].rsplit(" / ", 1)[0].rstrip() if " / " in combined[:limit] else combined[:limit]
+
+
+def _merge_confidence(existing_value, new_value):
+    try:
+        existing_value = float(existing_value) if existing_value is not None else 0.0
+    except Exception:
+        existing_value = 0.0
+    try:
+        new_value = float(new_value) if new_value is not None else 0.0
+    except Exception:
+        new_value = 0.0
+    return max(existing_value, new_value)
+
+
+def _is_profile_diff_payload(profile):
+    if not isinstance(profile, dict):
+        return False
+    if "personality_traits_updates" in profile or "preference_updates" in profile or "matching_hypothesis_updates" in profile or "new_values" in profile:
+        return True
+    summary = profile.get("summary", {})
+    return isinstance(summary, dict) and "new_tensions" in summary
+
+
+def _normalize_key(text: str) -> str:
+    text = _normalize_text(text)
+    if not text:
+        return ""
+    text = re.sub(r"[^\w\s]", " ", text, flags=re.UNICODE)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.lower()
+
+
+def _normalize_canonical_key(canonical_key: str, fallback_text: str = "") -> str:
+    canonical_key = _normalize_text(canonical_key)
+    if canonical_key:
+        normalized = _normalize_key(canonical_key)
+        if normalized:
+            return re.sub(r"\s+", "_", normalized)
+    if fallback_text:
+        fallback = _normalize_key(fallback_text)
+        return re.sub(r"\s+", "_", fallback)
+    return ""
+
+
+def _candidate_description_key(candidate: dict) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    desc = candidate.get("description", "")
+    return _normalize_key(desc)
+
+
+def _has_shared_significant_tokens(text_a: str, text_b: str) -> bool:
+    tokens_a = [t for t in _normalize_key(text_a).split() if len(t) > 1]
+    tokens_b = [t for t in _normalize_key(text_b).split() if len(t) > 1]
+    if not tokens_a or not tokens_b:
+        return False
+
+    common = set(tokens_a) & set(tokens_b)
+    if len(common) < 2:
+        return False
+
+    generic_tokens = {
+        "好む", "好き", "する", "感じ", "感じる", "こと", "もの", "人", "な", "の", "に", "で", "と", "が", "し", "や", "ため", "よう",
+        "部分", "程度", "場合", "感じ", "また", "ほど", "より", "だけ", "ただ", "もう", "だから",
+    }
+    significant = {token for token in common if token not in generic_tokens}
+    if significant:
+        total_unique = len(set(tokens_a + tokens_b))
+        if len(significant) / max(1, total_unique) >= 0.25:
+            return True
+    return False
+
+
+def _is_similar_candidate(existing_text: str, new_text: str) -> bool:
+    existing_text = _normalize_text(existing_text)
+    new_text = _normalize_text(new_text)
+    if not existing_text or not new_text:
+        return False
+
+    existing_key = _normalize_key(existing_text)
+    new_key = _normalize_key(new_text)
+    return bool(existing_key and existing_key == new_key)
+
+
+def _find_candidate(existing_candidates, canonical_key: str, description: str):
+    canonical_key = _normalize_canonical_key(canonical_key, description)
+    if canonical_key:
+        for candidate in existing_candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if _normalize_canonical_key(candidate.get("canonical_key", "")) == canonical_key:
+                return candidate
+
+    description_key = _normalize_key(description)
+    for candidate in existing_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if _normalize_key(candidate.get("description", "")) == description_key:
+            return candidate
+
+    for candidate in existing_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if _is_similar_candidate(candidate.get("description", ""), description):
+            return candidate
+
+    return None
+
+
+def _merge_evidence_list(existing_evidence, new_evidence, limit=None):
+    if not isinstance(existing_evidence, list):
+        existing_evidence = []
+    if not isinstance(new_evidence, list):
+        new_evidence = []
+    merged = []
+    seen = set()
+    for item in list(existing_evidence) + list(new_evidence):
+        item = _normalize_text(item)
+        if not item or item in seen:
+            continue
+        seen.add(item)
+        merged.append(item)
+    if limit is not None and len(merged) > limit:
+        return merged[-limit:]
+    return merged
+
+
+def _merge_topic_metadata(existing_metadata: list, display_name: str, canonical_key: str, session_id: str) -> list:
+    if not isinstance(existing_metadata, list):
+        existing_metadata = []
+    display_name = _normalize_text(display_name)
+    if not display_name:
+        return existing_metadata
+    canonical_key_norm = _normalize_canonical_key(canonical_key, display_name)
+
+    for meta in existing_metadata:
+        if not isinstance(meta, dict):
+            continue
+        ck = _normalize_canonical_key(meta.get("canonical_key", ""))
+        dn = _normalize_text(meta.get("display_name", ""))
+        if (canonical_key_norm and ck == canonical_key_norm) or dn == display_name:
+            if canonical_key_norm and not meta.get("canonical_key"):
+                meta["canonical_key"] = canonical_key_norm
+            if session_id not in meta.get("evidence", []):
+                meta["support_count"] = int(meta.get("support_count", 0)) + 1
+                meta["last_seen_session_id"] = session_id
+                meta["evidence"] = _merge_evidence_list(meta.get("evidence", []), [session_id], limit=10)
+            return existing_metadata
+
+    new_meta = {
+        "canonical_key": canonical_key_norm,
+        "display_name": display_name,
+        "support_count": 1,
+        "first_seen_session_id": session_id,
+        "last_seen_session_id": session_id,
+        "evidence": [session_id],
+        "importance": 2,
+    }
+    existing_metadata.append(new_meta)
+    return existing_metadata
+
+
+def _evict_topic_metadata(metadata: list, limit: int = 30) -> list:
+    if not isinstance(metadata, list) or len(metadata) <= limit:
+        return metadata if isinstance(metadata, list) else []
+    sorted_meta = sorted(
+        (m for m in metadata if isinstance(m, dict)),
+        key=lambda m: (
+            int(m.get("importance", 0)),
+            int(m.get("support_count", 0)),
+            m.get("last_seen_session_id") or "",
+        ),
+        reverse=True,
+    )
+    return sorted_meta[:limit]
+
+
+def _trait_display_from_candidates(candidates: list, max_chars: int = 200) -> str:
+    if not isinstance(candidates, list):
+        return ""
+    valid = [
+        c for c in candidates
+        if isinstance(c, dict)
+        and c.get("status") not in {"corrected", "negated"}
+        and _normalize_text(c.get("description", ""))
+    ]
+    valid.sort(key=lambda c: int(c.get("support_count", 0)), reverse=True)
+    texts = [_normalize_text(c["description"]) for c in valid[:3]]
+    result = " / ".join(texts)
+    if len(result) > max_chars:
+        result = result[:max_chars].rsplit(" / ", 1)[0].rstrip()
+    return result
+
+
+def _normalize_reasoning_history_entry(entry, default_session_id=""):
+    if isinstance(entry, str):
+        text = _normalize_text(entry)
+        if not text:
             return None
+        return {
+            "text": text,
+            "session_id": _normalize_text(default_session_id),
+            "created_at": datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+    if isinstance(entry, dict):
+        text = _normalize_text(entry.get("text", ""))
+        if not text:
+            return None
+        return {
+            "text": text,
+            "session_id": _normalize_text(entry.get("session_id", "")) or _normalize_text(default_session_id),
+            "created_at": _normalize_text(entry.get("created_at", "")) or datetime.datetime.now().isoformat(timespec="seconds"),
+        }
+    return None
 
-        oauth = st.secrets["google_oauth"]
 
-        creds = Credentials(
-            token=None,
-            refresh_token=oauth["refresh_token"],
-            token_uri=oauth.get("token_uri", "https://oauth2.googleapis.com/token"),
-            client_id=oauth["client_id"],
-            client_secret=oauth["client_secret"],
-            scopes=GOOGLE_DRIVE_SCOPES,
+def _merge_reasoning_history_entries(existing_entries, new_entries, session_id, limit=20):
+    if not isinstance(existing_entries, list):
+        existing_entries = []
+    if not isinstance(new_entries, list):
+        new_entries = []
+    merged = []
+    seen = set()
+
+    for entry in list(new_entries) + list(existing_entries):
+        normalized = _normalize_reasoning_history_entry(entry, default_session_id=session_id)
+        if not normalized:
+            continue
+        key = (normalized["text"], normalized["session_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(normalized)
+    if limit is not None and len(merged) > limit:
+        return merged[:limit]
+    return merged
+
+
+def _normalize_candidate_entry(candidate):
+    if not isinstance(candidate, dict):
+        return None
+    normalized = {
+        "description": _normalize_text(candidate.get("description", "")),
+        "canonical_key": _normalize_canonical_key(candidate.get("canonical_key", ""), candidate.get("description", "")),
+        "status": candidate.get("status", "candidate"),
+        "support_count": int(candidate.get("support_count", 0)) if candidate.get("support_count") is not None else 0,
+        "first_seen_session_id": candidate.get("first_seen_session_id", ""),
+        "last_seen_session_id": candidate.get("last_seen_session_id", ""),
+        "evidence": _merge_profile_list(candidate.get("evidence", []), []) if isinstance(candidate.get("evidence", []), list) else [],
+        "confidence": float(candidate.get("confidence", 0.0)) if candidate.get("confidence") is not None else 0.0,
+    }
+    if normalized["support_count"] >= 2 and normalized["status"] not in {"negated", "corrected", "explicit_correction"}:
+        normalized["status"] = "stable"
+    return normalized
+
+
+def _merge_candidate_entry(existing_candidates, candidate_text, session_id, confidence, canonical_key="", correction=False, explicit_correction=False):
+    if not isinstance(existing_candidates, list):
+        existing_candidates = []
+    candidate_text = _normalize_text(candidate_text)
+    if not candidate_text:
+        return existing_candidates
+    canonical_key = _normalize_canonical_key(canonical_key, candidate_text)
+
+    for idx, candidate in enumerate(existing_candidates):
+        if not isinstance(candidate, dict):
+            continue
+        existing_candidates[idx] = _normalize_candidate_entry(candidate)
+
+    candidate = _find_candidate(existing_candidates, canonical_key, candidate_text)
+    if candidate:
+        if session_id not in candidate.get("evidence", []):
+            candidate["evidence"] = _merge_evidence_list(candidate.get("evidence", []), [session_id], limit=10)
+            candidate["last_seen_session_id"] = session_id
+            if not correction:
+                candidate["support_count"] = int(candidate.get("support_count", 0)) + 1
+        candidate["confidence"] = max(float(candidate.get("confidence", 0.0)), float(confidence or 0.0))
+        if correction:
+            candidate["status"] = "corrected"
+        if explicit_correction:
+            candidate["status"] = "explicit_correction"
+        if canonical_key and not candidate.get("canonical_key"):
+            candidate["canonical_key"] = canonical_key
+    else:
+        status = "candidate"
+        if correction:
+            status = "corrected"
+        elif explicit_correction:
+            status = "explicit_correction"
+        new_candidate = {
+            "description": candidate_text,
+            "canonical_key": canonical_key,
+            "status": status,
+            "support_count": 1,
+            "first_seen_session_id": session_id,
+            "last_seen_session_id": session_id,
+            "evidence": [session_id],
+            "confidence": float(confidence or 0.0),
+        }
+        existing_candidates.append(new_candidate)
+        candidate = new_candidate
+
+    if candidate.get("status") not in {"negated", "corrected", "explicit_correction"} and int(candidate.get("support_count", 0)) >= 2:
+        candidate["status"] = "stable"
+
+    return existing_candidates
+
+
+def _reinforce_candidate(existing_candidates: list, canonical_key: str, session_id: str, confidence: float = 0.0) -> str:
+    """
+    Reinforce an existing candidate identified by canonical_key.
+    Returns 'reinforced', 'already_done', 'skipped_status', or 'not_found'.
+    Never creates new candidates — caller handles missing-key logging.
+    """
+    if not isinstance(existing_candidates, list) or not canonical_key:
+        return "not_found"
+    norm_key = _normalize_canonical_key(canonical_key)
+    if not norm_key:
+        return "not_found"
+    for candidate in existing_candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if _normalize_canonical_key(candidate.get("canonical_key", "")) != norm_key:
+            continue
+        if candidate.get("status") in {"corrected", "negated", "explicit_correction", "archived"}:
+            return "skipped_status"
+        if session_id in candidate.get("evidence", []):
+            return "already_done"
+        candidate["evidence"] = _merge_evidence_list(candidate.get("evidence", []), [session_id], limit=10)
+        candidate["last_seen_session_id"] = session_id
+        candidate["support_count"] = int(candidate.get("support_count", 0)) + 1
+        candidate["confidence"] = max(float(candidate.get("confidence", 0.0)), float(confidence or 0.0))
+        if int(candidate.get("support_count", 0)) >= 2:
+            candidate["status"] = "stable"
+        return "reinforced"
+    return "not_found"
+
+
+def _choose_summary_stable_text(existing_stable: str, candidates: list) -> str:
+    explicit = [c for c in candidates if isinstance(c, dict) and c.get("status") == "explicit_correction"]
+    if explicit:
+        descriptions = [c.get("description", "") for c in explicit if c.get("description")]
+        if descriptions:
+            return descriptions[0]
+
+    stable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("status") == "stable"]
+    if stable_candidates:
+        descriptions = [c.get("description", "") for c in stable_candidates if c.get("description")]
+        if len(descriptions) == 1:
+            return descriptions[0]
+        if len(descriptions) == 2:
+            return f"{descriptions[0]}と{descriptions[1]}"
+        if len(descriptions) >= 3:
+            return f"{descriptions[0]}、{descriptions[1]}、そして{descriptions[2]}の傾向がある。"
+    if existing_stable:
+        return existing_stable
+    return ""
+
+
+def _apply_summary_corrections(stable_candidates, corrections, session_id):
+    if not isinstance(stable_candidates, list):
+        return []
+    if not isinstance(corrections, list):
+        return stable_candidates
+
+    for correction in corrections:
+        if not isinstance(correction, dict):
+            continue
+        target_key = _normalize_canonical_key(correction.get("target_canonical_key", ""), correction.get("old_value", ""))
+        new_key = _normalize_canonical_key(correction.get("new_canonical_key", ""), correction.get("new_value", ""))
+        target_value = correction.get("old_value", "")
+        new_value = correction.get("new_value", "")
+        if not new_value:
+            continue
+
+        old_candidate = None
+        if target_key:
+            for candidate in stable_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                if _normalize_canonical_key(candidate.get("canonical_key", "")) == target_key:
+                    old_candidate = candidate
+                    break
+        if not old_candidate and target_value:
+            for candidate in stable_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                if _normalize_key(candidate.get("description", "")) == _normalize_key(target_value) or _is_similar_candidate(candidate.get("description", ""), target_value):
+                    old_candidate = candidate
+                    break
+
+        if old_candidate:
+            old_candidate["status"] = "corrected"
+            old_candidate["last_seen_session_id"] = session_id
+            old_candidate["evidence"] = _merge_evidence_list(old_candidate.get("evidence", []), [session_id], limit=10)
+
+        stable_candidates = _merge_candidate_entry(
+            stable_candidates,
+            new_value,
+            session_id,
+            0.0,
+            canonical_key=new_key,
+            correction=False,
+            explicit_correction=True,
         )
 
-        creds.refresh(Request())
+    return stable_candidates
 
+
+def _merge_summary_from_diff(existing_profile: dict, new_profile: dict, session_id: str) -> dict:
+    existing_summary = normalize_summary(existing_profile.get("summary", ""))
+    diff_summary = new_profile.get("summary", {}) if isinstance(new_profile.get("summary", {}), dict) else {}
+    all_corrections = new_profile.get("corrections", []) if isinstance(new_profile.get("corrections", []), list) else []
+    # Only pass corrections that target summary fields to avoid contaminating from other field corrections
+    corrections = [
+        c for c in all_corrections
+        if isinstance(c, dict) and (
+            not _normalize_text(c.get("field", "")) or
+            "summary" in _normalize_text(c.get("field", "")).lower()
+        )
+    ]
+    stable_candidates = existing_summary.get("stable_candidates", [])
+
+    stable_candidates = [c for c in stable_candidates if isinstance(c, dict)]
+    stable_candidates = [_normalize_candidate_entry(c) for c in stable_candidates]
+
+    if corrections:
+        stable_candidates = _apply_summary_corrections(stable_candidates, corrections, session_id)
+
+    stable_candidates_inputs = diff_summary.get("stable_candidates")
+    if isinstance(stable_candidates_inputs, list):
+        for entry in stable_candidates_inputs:
+            if isinstance(entry, dict):
+                desc = entry.get("description", "")
+                key = entry.get("canonical_key", "")
+            else:
+                desc = _normalize_text(entry)
+                key = ""
+            stable_candidates = _merge_candidate_entry(
+                stable_candidates,
+                desc,
+                session_id,
+                new_profile.get("confidence", {}).get("summary", 0.0),
+                canonical_key=key,
+            )
+    else:
+        stable_candidate = diff_summary.get("stable_candidate") or diff_summary.get("stable", "")
+        if stable_candidate:
+            stable_candidates = _merge_candidate_entry(
+                stable_candidates,
+                stable_candidate,
+                session_id,
+                new_profile.get("confidence", {}).get("summary", 0.0),
+            )
+
+    # Process reinforced_candidate_keys: re-confirmation of existing candidates by canonical_key
+    reinforced_keys = diff_summary.get("reinforced_candidate_keys")
+    if isinstance(reinforced_keys, list):
+        _conf = float(new_profile.get("confidence", {}).get("summary", 0.0) if isinstance(new_profile.get("confidence"), dict) else 0.0)
+        for _rkey in reinforced_keys:
+            _rkey = (_rkey or "").strip()
+            if not _rkey:
+                continue
+            _result = _reinforce_candidate(stable_candidates, _rkey, session_id, _conf)
+            if _result == "not_found":
+                try:
+                    write_debug_log("profile_reinforcement_key_not_found", {"field": "summary", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+            elif _result == "skipped_status":
+                try:
+                    write_debug_log("profile_reinforcement_skipped_invalid_status", {"field": "summary", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+
+    stable = _choose_summary_stable_text(existing_summary.get("stable", ""), stable_candidates)
+    recent = _merge_profile_scalar(existing_summary.get("recent", ""), diff_summary.get("recent", ""))
+    growth = _merge_profile_scalar(existing_summary.get("growth", ""), diff_summary.get("growth", ""))
+    tensions = _merge_profile_list(existing_summary.get("tensions", []), diff_summary.get("new_tensions", []), limit=15)
+    return {
+        "stable": stable,
+        "recent": recent,
+        "growth": growth,
+        "tensions": tensions,
+        "stable_candidates": stable_candidates,
+    }
+
+
+def normalize_summary(summary):
+    if isinstance(summary, dict):
+        return {
+            "stable": summary.get("stable", ""),
+            "recent": summary.get("recent", ""),
+            "growth": summary.get("growth", ""),
+            "tensions": summary.get("tensions", []) if isinstance(summary.get("tensions", []), list) else [],
+            "stable_candidates": summary.get("stable_candidates", []) if isinstance(summary.get("stable_candidates", []), list) else [],
+        }
+    if isinstance(summary, str):
+        return {"stable": summary, "recent": "", "growth": "", "tensions": [], "stable_candidates": []}
+    return {"stable": "", "recent": "", "growth": "", "tensions": [], "stable_candidates": []}
+
+
+def normalize_matching_hypothesis(mh):
+    if not isinstance(mh, dict):
+        return {
+            "stable_good_match": "",
+            "recent_good_match": "",
+            "likely_bad_match": "",
+            "reasoning_history": [],
+            "reasoning_history_entries": [],
+            "stable_candidates": [],
+        }
+    if "stable_good_match" in mh or "recent_good_match" in mh or "reasoning_history" in mh:
+        return {
+            "stable_good_match": mh.get("stable_good_match", ""),
+            "recent_good_match": mh.get("recent_good_match", ""),
+            "likely_bad_match": mh.get("likely_bad_match", ""),
+            "reasoning_history": mh.get("reasoning_history", []) if isinstance(mh.get("reasoning_history", []), list) else [],
+            "reasoning_history_entries": mh.get("reasoning_history_entries", []) if isinstance(mh.get("reasoning_history_entries", []), list) else [],
+            "stable_candidates": mh.get("stable_candidates", []) if isinstance(mh.get("stable_candidates", []), list) else [],
+        }
+    return {
+        "stable_good_match": mh.get("likely_good_match", ""),
+        "recent_good_match": "",
+        "likely_bad_match": mh.get("likely_bad_match", ""),
+        "reasoning_history": [mh.get("reason", "")] if mh.get("reason") else [],
+        "reasoning_history_entries": [],
+        "stable_candidates": [],
+    }
+
+
+def get_profile_summary_text(profile):
+    summary = profile.get("summary", "")
+    if isinstance(summary, dict):
+        if summary.get("recent"):
+            return summary.get("recent", "")
+        return summary.get("stable", "")
+    if isinstance(summary, str):
+        return summary
+    return ""
+
+
+def get_profile_summary_display(profile):
+    summary = profile.get("summary", "")
+    if isinstance(summary, dict):
+        pieces = []
+        stable = summary.get("stable", "")
+        recent = summary.get("recent", "")
+        growth = summary.get("growth", "")
+        if stable:
+            pieces.append(stable)
+        if recent:
+            pieces.append(f"最近: {recent}")
+        if growth:
+            pieces.append(f"変化: {growth}")
+        return " / ".join(pieces).strip()
+    if isinstance(summary, str):
+        return summary
+    return ""
+
+
+def get_profile_matching_good_match(profile):
+    mh = profile.get("matching_hypothesis", {})
+    if not isinstance(mh, dict):
+        return ""
+    return mh.get("recent_good_match") or mh.get("stable_good_match") or mh.get("likely_good_match", "")
+
+
+def _resolve_trait_value(existing_value, new_value, corrections, field_name):
+    if not isinstance(corrections, list):
+        return _merge_trait_text(existing_value, new_value)
+    correction_fields = {
+        _normalize_text(c.get("field", "")).lower()
+        for c in corrections
+        if isinstance(c, dict) and _normalize_text(c.get("field", ""))
+    }
+    if correction_fields and (field_name in correction_fields or f"personality_traits.{field_name}" in correction_fields):
+        return _normalize_text(new_value) or existing_value
+    if correction_fields and new_value and existing_value:
+        return _normalize_text(new_value) or existing_value
+    return _merge_trait_text(existing_value, new_value)
+
+
+def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> dict:
+    merged = deepcopy(existing)
+
+    _existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
+    if session_id and session_id in _existing_evidence:
+        merged["profile_version"] = PROFILE_VERSION
+        return merged
+
+    merged["user_id"] = existing.get("user_id", new_profile.get("user_id", ""))
+    merged["profile_version"] = PROFILE_VERSION
+    merged["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+
+    if _is_profile_diff_payload(new_profile):
+        existing_personality = existing.get("personality_traits", {}) if isinstance(existing.get("personality_traits", {}), dict) else {}
+        personality_updates = new_profile.get("personality_traits_updates", {}) if isinstance(new_profile.get("personality_traits_updates", {}), dict) else {}
+        corrections = new_profile.get("corrections", []) if isinstance(new_profile.get("corrections", []), list) else []
+
+        # Display personality_traits from string updates (backward-compatible)
+        merged["personality_traits"] = {
+            "communication_style": _resolve_trait_value(
+                existing_personality.get("communication_style", ""),
+                personality_updates.get("communication_style", ""),
+                corrections,
+                "communication_style",
+            ),
+            "decision_style": _resolve_trait_value(
+                existing_personality.get("decision_style", ""),
+                personality_updates.get("decision_style", ""),
+                corrections,
+                "decision_style",
+            ),
+            "emotional_tendency": _resolve_trait_value(
+                existing_personality.get("emotional_tendency", ""),
+                personality_updates.get("emotional_tendency", ""),
+                corrections,
+                "emotional_tendency",
+            ),
+        }
+
+        # Process personality_trait_candidates from diff
+        existing_ptc = existing.get("personality_trait_candidates", {})
+        if not isinstance(existing_ptc, dict):
+            existing_ptc = {}
+        new_ptc = new_profile.get("personality_trait_candidates", {})
+        if not isinstance(new_ptc, dict):
+            new_ptc = {}
+
+        _conf_summary = float(new_profile.get("confidence", {}).get("summary", 0.0) if isinstance(new_profile.get("confidence"), dict) else 0.0)
+        merged_ptc = {
+            "communication_style": list(existing_ptc.get("communication_style") or []),
+            "decision_style": list(existing_ptc.get("decision_style") or []),
+            "emotional_tendency": list(existing_ptc.get("emotional_tendency") or []),
+        }
+        for _field in ["communication_style", "decision_style", "emotional_tendency"]:
+            for _entry in (new_ptc.get(_field) or []):
+                if not isinstance(_entry, dict):
+                    continue
+                _desc = _normalize_text(_entry.get("description", ""))
+                _key = _entry.get("canonical_key", "")
+                if not _desc:
+                    continue
+                merged_ptc[_field] = _merge_candidate_entry(
+                    merged_ptc[_field], _desc, session_id, _conf_summary, canonical_key=_key,
+                )
+            # Apply corrections to personality_trait_candidates
+            for _corr in corrections:
+                if not isinstance(_corr, dict):
+                    continue
+                _field_raw = _normalize_text(_corr.get("field", "")).lower()
+                if _field not in _field_raw and f"personality_traits.{_field}" not in _field_raw:
+                    continue
+                _target_key = _normalize_canonical_key(_corr.get("target_canonical_key", ""), _corr.get("old_value", ""))
+                _old_val_key = _normalize_key(_corr.get("old_value", ""))
+                for _c in merged_ptc[_field]:
+                    if not isinstance(_c, dict):
+                        continue
+                    _ck = _normalize_canonical_key(_c.get("canonical_key", ""))
+                    if (_target_key and _ck == _target_key) or (_old_val_key and _normalize_key(_c.get("description", "")) == _old_val_key):
+                        _c["status"] = "corrected"
+                        _c["last_seen_session_id"] = session_id
+                        _c["evidence"] = _merge_evidence_list(_c.get("evidence", []), [session_id], limit=10)
+                        break
+                _new_val = _normalize_text(_corr.get("new_value", ""))
+                _new_key = _normalize_canonical_key(_corr.get("new_canonical_key", ""), _new_val)
+                if _new_val:
+                    merged_ptc[_field] = _merge_candidate_entry(
+                        merged_ptc[_field], _new_val, session_id, 0.0, canonical_key=_new_key, explicit_correction=True,
+                    )
+
+        # Process personality_trait_reinforced_keys
+        ptc_reinforced = new_profile.get("personality_trait_reinforced_keys", {})
+        if isinstance(ptc_reinforced, dict):
+            for _field in ["communication_style", "decision_style", "emotional_tendency"]:
+                for _rkey in (ptc_reinforced.get(_field) or []):
+                    _rkey = (_rkey or "").strip()
+                    if not _rkey:
+                        continue
+                    _result = _reinforce_candidate(merged_ptc[_field], _rkey, session_id, _conf_summary)
+                    if _result == "not_found":
+                        try:
+                            write_debug_log("profile_reinforcement_key_not_found", {"field": f"personality_trait_candidates.{_field}", "canonical_key": _rkey, "session_id": session_id})
+                        except Exception:
+                            pass
+                    elif _result == "skipped_status":
+                        try:
+                            write_debug_log("profile_reinforcement_skipped_invalid_status", {"field": f"personality_trait_candidates.{_field}", "canonical_key": _rkey, "session_id": session_id})
+                        except Exception:
+                            pass
+
+        merged["personality_trait_candidates"] = merged_ptc
+
+        # Override display personality_traits from candidates when available
+        for _field in ["communication_style", "decision_style", "emotional_tendency"]:
+            _display = _trait_display_from_candidates(merged_ptc.get(_field, []))
+            if _display:
+                merged["personality_traits"][_field] = _display
+
+        merged["values"] = _merge_profile_list(existing.get("values", []), new_profile.get("new_values", []), limit=10)
+
+        # Conversation topics with persistent metadata
+        existing_preferences = existing.get("preferences", {}) if isinstance(existing.get("preferences", {}), dict) else {}
+        preference_updates = new_profile.get("preference_updates", {}) if isinstance(new_profile.get("preference_updates", {}), dict) else {}
+
+        existing_topic_meta = existing_preferences.get("conversation_topic_metadata", [])
+        if not isinstance(existing_topic_meta, list):
+            existing_topic_meta = []
+
+        # Build stubs from existing topics if no metadata yet (backward compat)
+        if not existing_topic_meta:
+            for _t in (existing_preferences.get("conversation_topics") or []):
+                _t_str = _normalize_text(_t)
+                if _t_str:
+                    existing_topic_meta.append({
+                        "canonical_key": _normalize_canonical_key("", _t_str),
+                        "display_name": _t_str,
+                        "support_count": 1,
+                        "first_seen_session_id": "",
+                        "last_seen_session_id": "",
+                        "evidence": [],
+                        "importance": 1,
+                    })
+
+        updated_topic_meta = [dict(m) for m in existing_topic_meta if isinstance(m, dict)]
+        new_topics_from_diff = preference_updates.get("new_conversation_topics", [])
+        if not isinstance(new_topics_from_diff, list):
+            new_topics_from_diff = []
+        for _te in new_topics_from_diff:
+            if isinstance(_te, dict):
+                _td = _normalize_text(_te.get("description", ""))
+                _tk = _te.get("canonical_key", "")
+            elif isinstance(_te, str):
+                _td = _normalize_text(_te)
+                _tk = ""
+            else:
+                continue
+            if not _td:
+                continue
+            updated_topic_meta = _merge_topic_metadata(updated_topic_meta, _td, _tk, session_id)
+
+        updated_topic_meta = _evict_topic_metadata(updated_topic_meta, limit=30)
+
+        merged["preferences"] = {
+            "relationship_style": _merge_profile_scalar(
+                existing_preferences.get("relationship_style", ""),
+                preference_updates.get("relationship_style", ""),
+            ),
+            "conversation_topics": [m.get("display_name", "") for m in updated_topic_meta if isinstance(m, dict) and m.get("display_name")],
+            "dislikes": _merge_profile_list(
+                existing_preferences.get("dislikes", []),
+                preference_updates.get("new_dislikes", []),
+                limit=15,
+            ),
+            "conversation_topic_metadata": updated_topic_meta,
+        }
+
+        existing_mh = normalize_matching_hypothesis(existing.get("matching_hypothesis", {}))
+        mh_updates = new_profile.get("matching_hypothesis_updates", {}) if isinstance(new_profile.get("matching_hypothesis_updates", {}), dict) else {}
+        matching_candidates = existing_mh.get("stable_candidates", []) if isinstance(existing_mh.get("stable_candidates", []), list) else []
+        matching_candidates = [_normalize_candidate_entry(c) for c in matching_candidates if isinstance(c, dict)]
+
+        _mh_conf = float(new_profile.get("confidence", {}).get("matching_hypothesis", 0.0) if isinstance(new_profile.get("confidence"), dict) else 0.0)
+        stable_candidate_entries = mh_updates.get("stable_good_match_candidates", []) if isinstance(mh_updates.get("stable_good_match_candidates", []), list) else []
+        for entry in stable_candidate_entries:
+            if not isinstance(entry, dict):
+                continue
+            matching_candidates = _merge_candidate_entry(
+                matching_candidates,
+                entry.get("description", ""),
+                session_id,
+                _mh_conf,
+                canonical_key=entry.get("canonical_key", ""),
+            )
+
+        # Process reinforced_stable_good_match_candidate_keys
+        mh_reinforced_keys = mh_updates.get("reinforced_stable_good_match_candidate_keys", [])
+        if not isinstance(mh_reinforced_keys, list):
+            mh_reinforced_keys = []
+        for _rkey in mh_reinforced_keys:
+            _rkey = (_rkey or "").strip()
+            if not _rkey:
+                continue
+            _result = _reinforce_candidate(matching_candidates, _rkey, session_id, _mh_conf)
+            if _result == "not_found":
+                try:
+                    write_debug_log("profile_reinforcement_key_not_found", {"field": "matching_hypothesis", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+            elif _result == "skipped_status":
+                try:
+                    write_debug_log("profile_reinforcement_skipped_invalid_status", {"field": "matching_hypothesis", "canonical_key": _rkey, "session_id": session_id})
+                except Exception:
+                    pass
+
+        # Apply corrections to matching_hypothesis candidates
+        for _corr in corrections:
+            if not isinstance(_corr, dict):
+                continue
+            _field_raw = _normalize_text(_corr.get("field", "")).lower()
+            if not ("matching_hypothesis" in _field_raw or "good_match" in _field_raw):
+                continue
+            _target_key = _normalize_canonical_key(_corr.get("target_canonical_key", ""), _corr.get("old_value", ""))
+            _old_val_key = _normalize_key(_corr.get("old_value", ""))
+            for _mc in matching_candidates:
+                if not isinstance(_mc, dict):
+                    continue
+                _ck = _normalize_canonical_key(_mc.get("canonical_key", ""))
+                if (_target_key and _ck == _target_key) or (_old_val_key and _normalize_key(_mc.get("description", "")) == _old_val_key):
+                    _mc["status"] = "corrected"
+                    _mc["last_seen_session_id"] = session_id
+                    _mc["evidence"] = _merge_evidence_list(_mc.get("evidence", []), [session_id], limit=10)
+                    break
+            _new_val = _normalize_text(_corr.get("new_value", ""))
+            _new_key = _normalize_canonical_key(_corr.get("new_canonical_key", ""), _new_val)
+            if _new_val:
+                matching_candidates = _merge_candidate_entry(
+                    matching_candidates, _new_val, session_id, 0.0, canonical_key=_new_key, explicit_correction=True,
+                )
+
+        stable_good_match = existing_mh.get("stable_good_match", "")
+        if mh_updates.get("recent_good_match"):
+            recent_good_match = mh_updates.get("recent_good_match")
+        else:
+            recent_good_match = existing_mh.get("recent_good_match", "")
+
+        # explicit_correction takes priority for stable_good_match
+        _explicit_mh = [c for c in matching_candidates if isinstance(c, dict) and c.get("status") == "explicit_correction"]
+        if _explicit_mh:
+            stable_good_match = _explicit_mh[0].get("description", "")
+        else:
+            # Clear stable_good_match if its candidate is now corrected
+            if stable_good_match:
+                _sgm_corrected = next(
+                    (c for c in matching_candidates if isinstance(c, dict) and c.get("description") == stable_good_match and c.get("status") in {"corrected", "negated"}),
+                    None,
+                )
+                if _sgm_corrected:
+                    stable_good_match = ""
+            # Promote newly stable candidates (support_count >= 2) — includes new entries and reinforced keys
+            _promoted_keys_to_check = set()
+            for entry in stable_candidate_entries:
+                if isinstance(entry, dict):
+                    _promoted_keys_to_check.add(_normalize_canonical_key(entry.get("canonical_key", ""), entry.get("description", "")))
+            for _rkey in mh_reinforced_keys:
+                _rk = _normalize_canonical_key((_rkey or "").strip())
+                if _rk:
+                    _promoted_keys_to_check.add(_rk)
+            for _pk in _promoted_keys_to_check:
+                _ce = next(
+                    (c for c in matching_candidates if isinstance(c, dict) and _normalize_canonical_key(c.get("canonical_key", "")) == _pk),
+                    None,
+                )
+                if _ce and _ce.get("status") == "stable" and _ce.get("support_count", 0) >= 2:
+                    stable_good_match = _ce.get("description", "")
+                    break
+
+        merged["matching_hypothesis"] = {
+            "stable_good_match": stable_good_match,
+            "recent_good_match": recent_good_match,
+            "likely_bad_match": _merge_profile_scalar(
+                existing_mh.get("likely_bad_match", ""),
+                mh_updates.get("likely_bad_match", ""),
+            ),
+            "reasoning_history": existing_mh.get("reasoning_history", []) if isinstance(existing_mh.get("reasoning_history", []), list) else [],
+            "reasoning_history_entries": _merge_reasoning_history_entries(
+                existing_mh.get("reasoning_history_entries", []),
+                mh_updates.get("new_reasons", []),
+                session_id,
+                limit=20,
+            ),
+            "stable_candidates": matching_candidates,
+        }
+
+        merged["confidence"] = {
+            "summary": _merge_confidence(
+                existing.get("confidence", {}).get("summary", 0.0),
+                new_profile.get("confidence", {}).get("summary", 0.0),
+            ),
+            "values": _merge_confidence(
+                existing.get("confidence", {}).get("values", 0.0),
+                new_profile.get("confidence", {}).get("values", 0.0),
+            ),
+            "matching_hypothesis": _merge_confidence(
+                existing.get("confidence", {}).get("matching_hypothesis", 0.0),
+                new_profile.get("confidence", {}).get("matching_hypothesis", 0.0),
+            ),
+        }
+
+        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id)
+    else:
+        merged["personality_traits"] = {
+            "communication_style": _merge_trait_text(
+                existing.get("personality_traits", {}).get("communication_style", ""),
+                new_profile.get("personality_traits", {}).get("communication_style", ""),
+            ),
+            "decision_style": _merge_trait_text(
+                existing.get("personality_traits", {}).get("decision_style", ""),
+                new_profile.get("personality_traits", {}).get("decision_style", ""),
+            ),
+            "emotional_tendency": _merge_trait_text(
+                existing.get("personality_traits", {}).get("emotional_tendency", ""),
+                new_profile.get("personality_traits", {}).get("emotional_tendency", ""),
+            ),
+        }
+
+        merged["values"] = _merge_profile_list(existing.get("values", []), new_profile.get("values", []), limit=10)
+
+        merged["preferences"] = {
+            "relationship_style": _merge_profile_scalar(
+                existing.get("preferences", {}).get("relationship_style", ""),
+                new_profile.get("preferences", {}).get("relationship_style", ""),
+            ),
+            "conversation_topics": _merge_profile_list(
+                existing.get("preferences", {}).get("conversation_topics", []),
+                new_profile.get("preferences", {}).get("conversation_topics", []),
+                limit=30,
+            ),
+            "dislikes": _merge_profile_list(
+                existing.get("preferences", {}).get("dislikes", []),
+                new_profile.get("preferences", {}).get("dislikes", []),
+                limit=15,
+            ),
+        }
+
+        existing_mh = normalize_matching_hypothesis(existing.get("matching_hypothesis", {}))
+        new_mh = normalize_matching_hypothesis(new_profile.get("matching_hypothesis", {}))
+
+        merged["matching_hypothesis"] = {
+            "stable_good_match": _merge_profile_scalar(
+                existing_mh.get("stable_good_match", ""),
+                new_mh.get("stable_good_match", ""),
+            ),
+            "recent_good_match": _merge_profile_scalar(
+                existing_mh.get("recent_good_match", ""),
+                new_mh.get("recent_good_match", ""),
+            ) or _merge_profile_scalar(
+                existing_mh.get("stable_good_match", ""),
+                new_mh.get("recent_good_match", ""),
+            ),
+            "likely_bad_match": _merge_profile_scalar(
+                existing_mh.get("likely_bad_match", ""),
+                new_mh.get("likely_bad_match", ""),
+            ),
+            "reasoning_history": _merge_profile_list(
+                existing_mh.get("reasoning_history", []),
+                new_mh.get("reasoning_history", []),
+                limit=20,
+            ),
+        }
+
+        merged["confidence"] = {
+            "summary": _merge_confidence(
+                existing.get("confidence", {}).get("summary", 0.0),
+                new_profile.get("confidence", {}).get("summary", 0.0),
+            ),
+            "values": _merge_confidence(
+                existing.get("confidence", {}).get("values", 0.0),
+                new_profile.get("confidence", {}).get("values", 0.0),
+            ),
+            "matching_hypothesis": _merge_confidence(
+                existing.get("confidence", {}).get("matching_hypothesis", 0.0),
+                new_profile.get("confidence", {}).get("matching_hypothesis", 0.0),
+            ),
+        }
+
+        merged["memory_notes"] = _merge_profile_list(
+            existing.get("memory_notes", []),
+            new_profile.get("memory_notes", []),
+        )
+
+        merged["uncertainties"] = _merge_profile_list(
+            existing.get("uncertainties", []),
+            new_profile.get("uncertainties", []),
+        )
+
+        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id)
+
+    existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
+    merged["evidence"] = _merge_evidence_list(existing_evidence, [session_id], limit=10)
+
+    merged["profile_update_count"] = max(
+        int(existing.get("profile_update_count", 0)),
+        0,
+    ) + 1
+
+    merged["first_created_at"] = existing.get("first_created_at") or datetime.datetime.now(
+        datetime.timezone(datetime.timedelta(hours=9))
+    ).isoformat(timespec="seconds")
+
+    return merged
+
+
+def load_profile_extraction_prompt() -> str:
+    try:
+        path = Path(__file__).parent / "prompts" / "profile_extraction_prompt.txt"
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    except Exception:
+        return ""
+
+
+def extract_fairy_profile(
+    chat_history: list,
+    existing_profile: dict,
+    user_id: str,
+    session_id: str,
+) -> dict:
+    client = get_openai_client()
+    if client is None:
+        return None
+
+    prompt_template = load_profile_extraction_prompt()
+    if not prompt_template:
+        write_debug_log("profile_extraction_prompt_missing", {"user_id": user_id})
+        return None
+
+    conversation = "\n".join(
+        [f"[{msg['role']}]: {msg['content']}" for msg in chat_history]
+    )
+    existing_json = json.dumps(existing_profile, ensure_ascii=False, indent=2)
+
+    def build_prompt(shorter: bool = False) -> str:
+        prompt = (
+            prompt_template
+            .replace("{{CONVERSATION}}", conversation)
+            .replace("{{EXISTING_PROFILE}}", existing_json)
+            .replace("{{USER_ID}}", user_id)
+            .replace("{{SESSION_ID}}", session_id)
+        )
+        if shorter:
+            prompt += "\n\n【再試行】前回の出力が不正でした。今回はより短い差分JSONだけを返してください。説明文や余分なキーは付けず、必要なキーだけを出力してください。"
+        return prompt
+
+    for attempt in range(2):
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "あなたはユーザーの会話からパーソナルAIプロフィールを生成・更新するアシスタントです。"
+                            "必ず有効なJSONのみを返してください。"
+                        ),
+                    },
+                    {"role": "user", "content": build_prompt(shorter=attempt == 1)},
+                ],
+                temperature=0.3,
+                max_completion_tokens=5000,
+                response_format={"type": "json_object"},
+            )
+            choice = response.choices[0]
+            raw = (choice.message.content or "").strip()
+            finish_reason = getattr(choice, "finish_reason", None)
+            preview_head = raw[:200]
+            preview_tail = raw[-200:] if len(raw) > 200 else raw
+            profile = extract_json(raw)
+            parsed_success = isinstance(profile, dict)
+            write_debug_log(
+                "profile_extraction_result",
+                {
+                    "user_id": user_id,
+                    "attempt": attempt + 1,
+                    "finish_reason": finish_reason,
+                    "raw_response_length": len(raw),
+                    "raw_response_head": preview_head,
+                    "raw_response_tail": preview_tail,
+                    "json_parse_success": parsed_success,
+                },
+            )
+            if not parsed_success:
+                write_debug_log(
+                    "profile_extraction_parse_failed",
+                    {
+                        "user_id": user_id,
+                        "attempt": attempt + 1,
+                        "finish_reason": finish_reason,
+                        "raw_response_length": len(raw),
+                        "raw_response_head": preview_head,
+                        "raw_response_tail": preview_tail,
+                    },
+                )
+                if attempt == 1:
+                    return None
+                continue
+
+            profile["user_id"] = user_id
+            profile["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            profile["profile_version"] = PROFILE_VERSION
+            return profile
+        except Exception as e:
+            write_debug_log(
+                "profile_extraction_exception",
+                {
+                    "user_id": user_id,
+                    "attempt": attempt + 1,
+                    "error": str(e),
+                },
+            )
+            if attempt == 1:
+                return None
+    return None
+
+
+def update_fairy_profile(user_id: str, chat_history: list, session_id: str) -> bool:
+    try:
+        existing = load_user_profile(user_id)
+
+        _ev = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
+        if session_id in _ev:
+            write_debug_log("profile_update_skipped_duplicate_session", {"user_id": user_id, "session_id": session_id})
+            return True
+
+        backup_saved = save_user_profile_history(existing.get("user_id", user_id), existing, session_id)
+        if not backup_saved:
+            write_debug_log("user_profile_history_backup_failed", {"user_id": user_id})
+
+        new_profile = extract_fairy_profile(chat_history, existing, user_id, session_id)
+        if new_profile is None:
+            write_debug_log(
+                "profile_update_skipped",
+                {"user_id": user_id, "reason": "extraction_failed"},
+            )
+            return False
+
+        merged_profile = merge_user_profiles(existing, new_profile, session_id)
+        success = save_user_profile(user_id, merged_profile)
+        if success:
+            save_user_profile_history(user_id, merged_profile, session_id)
+        write_debug_log("profile_update_finished", {"user_id": user_id, "success": success})
+        return success
+    except Exception as e:
+        write_debug_log("profile_update_exception", {"user_id": user_id, "error": str(e)})
+        return False
+
+
+def get_google_drive_service():
+    """Streamlit Secrets または token.json の OAuth refresh_token 情報から Google Drive API クライアントを作る。"""
+    try:
+        oauth_info = None
+
+        if "google_oauth" in st.secrets:
+            candidate = st.secrets["google_oauth"]
+            if isinstance(candidate, dict) and candidate.get("refresh_token"):
+                oauth_info = candidate
+
+        if oauth_info is None:
+            token_path = Path(__file__).parent / "token.json"
+            if token_path.exists():
+                try:
+                    with open(token_path, encoding="utf-8") as f:
+                        oauth_info = json.load(f)
+                except Exception as e:
+                    st.session_state.last_drive_upload_error = (
+                        f"token.json の読み込みに失敗しました: {e}"
+                    )
+                    write_error_log("google_drive_token_json_load_failed", str(e))
+                    return None
+
+        if oauth_info is None:
+            st.session_state.last_drive_upload_error = (
+                'Google Drive OAuth 情報が見つかりません。st.secrets["google_oauth"] または token.json を確認してください。'
+            )
+            write_error_log("google_drive_oauth_missing", "google_oauth or token.json missing")
+            return None
+
+        required_keys = ["refresh_token", "client_id", "client_secret", "token_uri"]
+        missing_keys = [k for k in required_keys if not oauth_info.get(k)]
+        if missing_keys:
+            st.session_state.last_drive_upload_error = (
+                "Google Drive OAuth 情報に次のキーが不足しています: "
+                + ", ".join(missing_keys)
+            )
+            write_error_log(
+                "google_drive_oauth_keys_missing",
+                "oauth keys missing",
+                {"missing_keys": missing_keys},
+            )
+            return None
+
+        creds = Credentials(
+            token=oauth_info.get("token"),
+            refresh_token=oauth_info.get("refresh_token"),
+            token_uri=oauth_info.get("token_uri"),
+            client_id=oauth_info.get("client_id"),
+            client_secret=oauth_info.get("client_secret"),
+            scopes=GOOGLE_DRIVE_SCOPES,
+        )
+        creds.refresh(Request())
         return build("drive", "v3", credentials=creds)
 
     except Exception as e:
-        st.session_state.last_drive_upload_error = f"Google Drive OAuth認証に失敗しました: {e}"
+        st.session_state.last_drive_upload_error = (
+            f"Google Drive OAuth認証に失敗しました: {e}\n"
+            "st.secrets[\"google_oauth\"] または token.json の設定を確認してください。"
+        )
         write_error_log("google_drive_oauth_failed", str(e))
         return None
 
@@ -849,6 +2320,7 @@ def save_session_markdown_log(session_status: str = "completed", end_reason: str
             "## セッション情報",
             f"- app_version: v{APP_VERSION}",
             f"- session_id: {session_id}",
+            f"- user_id: {st.session_state.get('user_id', '')}",
             f"- started_at: {started_at}",
             f"- ended_at: {ended_at}",
             f"- log_consent: {consent_value}",
@@ -959,6 +2431,7 @@ def create_initial_session_log():
             "## セッション情報",
             f"- app_version: v{APP_VERSION}",
             f"- session_id: {session_id}",
+            f"- user_id: {st.session_state.get('user_id', '')}",
             f"- started_at: {started_at}",
             "- ended_at: 未完了",
             f"- log_consent: {consent_value}",
@@ -1111,7 +2584,15 @@ def show_survey_screen():
 def _reset_chat_state():
     st.session_state.is_processing = False
     st.session_state.analyze_insufficient_msg = None
-    st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
+    # Reset or generate a new initial greeting for this session
+    st.session_state.initial_greeting = None
+    st.session_state.initial_greeting_generated = False
+    st.session_state.initial_greeting_fallback_used = False
+    greeting = generate_initial_greeting(DEFAULT_DISPLAY_NAME)
+    st.session_state.messages = [{"role": "assistant", "content": greeting}]
+    st.session_state.fairy_memory_context_used = False
+    st.session_state.fairy_memory_context_fields = []
+    st.session_state.fairy_memory_context_length = 0
     st.session_state.analysis_result = None
     st.session_state.match_result = None
     st.session_state.after_match_support = None
@@ -1161,6 +2642,7 @@ def handle_finish():
         "match_details_error", "selected_candidate_debug",
         "last_after_match_support_response", "last_after_match_support_error",
         "last_reply_finish_reason", "analyze_insufficient_msg", "is_processing",
+        "initial_greeting",
     ]:
         st.session_state.pop(key, None)
 
@@ -1209,12 +2691,30 @@ def load_candidates():
         return json.load(f)
 
 
-def initial_question() -> str:
-    return "あなたが最近、楽しかったことや少し気になっていることを教えてください。"
+def initial_question(user_id: str | None = None) -> str:
+    default = "あなたが最近、楽しかったことや少し気になっていることを教えてください。"
+    if not user_id:
+        return default
+    try:
+        profile = load_user_profile(user_id)
+        if not profile or (not profile.get("summary") and not profile.get("values")):
+            return default
+        category = categorize_profile_interests(profile)
+        if category == "cultural":
+            return "最近、見ている作品や本、動画で気になったことはありますか？"
+        if category == "academic":
+            return "最近、勉強していること、考えていることで気になったことはありますか？"
+        if category == "casual":
+            return "最近、楽しかったことや気になった日常の出来事はありますか？"
+        return default
+    except Exception:
+        return default
 
 
 def ensure_session_state():
     ensure_log_dirs()
+    if "user_id" not in st.session_state:
+        st.session_state.user_id = None
     if "consent_status" not in st.session_state:
         st.session_state.consent_status = None
     if "log_consent" not in st.session_state:
@@ -1230,7 +2730,28 @@ def ensure_session_state():
     if "is_processing" not in st.session_state:
         st.session_state.is_processing = False
     if "messages" not in st.session_state:
-        st.session_state.messages = [{"role": "assistant", "content": initial_question()}]
+        # Ensure an initial greeting exists for this session (generate once)
+        if "initial_greeting" not in st.session_state or st.session_state.get("initial_greeting") is None:
+            st.session_state.initial_greeting = None
+            st.session_state.initial_greeting_generated = False
+            st.session_state.initial_greeting_fallback_used = False
+            # generate and store the greeting
+            greeting = generate_initial_greeting(DEFAULT_DISPLAY_NAME)
+            st.session_state.messages = [{"role": "assistant", "content": greeting}]
+        else:
+            st.session_state.messages = [{"role": "assistant", "content": st.session_state.get("initial_greeting")}]
+    if "initial_greeting" not in st.session_state:
+        st.session_state.initial_greeting = None
+    if "initial_greeting_generated" not in st.session_state:
+        st.session_state.initial_greeting_generated = False
+    if "initial_greeting_fallback_used" not in st.session_state:
+        st.session_state.initial_greeting_fallback_used = False
+    if "fairy_memory_context_used" not in st.session_state:
+        st.session_state.fairy_memory_context_used = False
+    if "fairy_memory_context_fields" not in st.session_state:
+        st.session_state.fairy_memory_context_fields = []
+    if "fairy_memory_context_length" not in st.session_state:
+        st.session_state.fairy_memory_context_length = 0
     if "analysis_result" not in st.session_state:
         st.session_state.analysis_result = None
     if "match_result" not in st.session_state:
@@ -1508,11 +3029,75 @@ def render_mobile_bottom_bar():
     )
 
 def build_system_prompt() -> str:
-    return (
+    base = (
         "あなたは相手の性格や価値観を丁寧に引き出すAIです。"
         " ユーザーが話した内容を受けて、次の質問や共感を返してください。"
         " ただし、深掘りしすぎず、優しく進めてください。"
     )
+    user_id = st.session_state.get("user_id")
+    if not user_id:
+        st.session_state.fairy_memory_context_used = False
+        st.session_state.fairy_memory_context_fields = []
+        st.session_state.fairy_memory_context_length = 0
+        write_debug_log(
+            "fairy_memory_context_not_used",
+            {
+                "reason": "no_user_id",
+            },
+        )
+        return base
+    try:
+        profile = load_user_profile(user_id)
+        memory_context, used_fields = build_fairy_memory_context(profile)
+        if not memory_context:
+            st.session_state.fairy_memory_context_used = False
+            st.session_state.fairy_memory_context_fields = []
+            st.session_state.fairy_memory_context_length = 0
+            write_debug_log(
+                "fairy_memory_context_not_used",
+                {
+                    "user_id": user_id,
+                    "reason": "profile_empty",
+                },
+            )
+            return base
+        st.session_state.fairy_memory_context_used = True
+        st.session_state.fairy_memory_context_fields = used_fields
+        st.session_state.fairy_memory_context_length = len(memory_context)
+        write_debug_log(
+            "fairy_memory_context_used",
+            {
+                "user_id": user_id,
+                "session_id": get_or_create_session_id(),
+                "context_length": len(memory_context),
+                "used_fields": used_fields,
+            },
+        )
+        memory_rules = (
+            "\n\n【保存されたプロフィールの活用ルール】"
+            "\n以下の情報はユーザーとの過去の会話から学んだ背景知識です。会話を自然に進めるための補助情報として使ってください。"
+            "\n・今回のユーザーの発言を最優先してください。"
+            "\n・発言と保存情報が矛盾する場合は、今回の発言を優先し、保存情報は活用しないでください。"
+            "\n・保存情報を断定的な事実として扱わないでください。背景として参考にする程度にしてください。"
+            "\n・『以前あなたは〜と言いました』のように不自然に記憶を明示しないでください。"
+            "\n・保存情報と関連がある場合だけ、自然に活用してください。無関係な場合は持ち出さないでください。"
+            "\n・質問の方向、共感、具体例をユーザーの関心に合わせて調整してください。"
+            "\n・毎回同じ話題を持ち出さないでください。"
+            "\n・保存情報にない情報を作り出さないでください。"
+            "\n・プロフィールより、現在の会話の自然さを優先してください。"
+            f"\n\n【背景情報】\n{memory_context}"
+        )
+        return base + memory_rules
+    except Exception as e:
+        write_debug_log(
+            "fairy_memory_context_not_used",
+            {
+                "user_id": user_id,
+                "reason": "profile_load_failed",
+                "error": str(e),
+            },
+        )
+        return base
 
 
 def generate_ai_reply(chat_history):
@@ -1545,6 +3130,134 @@ def generate_ai_reply(chat_history):
         return content
     except Exception as e:
         return f"AI応答の取得中にエラーが発生しました: {e}"
+
+
+def generate_initial_greeting(display_name: str | None = None) -> str:
+    """
+    Generate a short initial greeting via OpenAI. Falls back to a fixed phrase on any error
+    or invalid output. Does not use any profile or history. Only the optional display_name
+    may be provided and, if present, must be used verbatim when the greeting chooses to
+    address the user.
+    """
+    client = get_openai_client()
+    session_id = get_or_create_session_id()
+    write_debug_log("initial_greeting_generation_started", {"session_id": session_id})
+
+    fallback = "今日はどんな話から始めましょうか？"
+
+    if client is None:
+        write_debug_log("initial_greeting_generation_failed", {"reason": "no_client", "fallback_used": True})
+        st.session_state.initial_greeting = fallback
+        st.session_state.initial_greeting_fallback_used = True
+        st.session_state.initial_greeting_generated = True
+        return fallback
+
+    # Build system prompt per spec
+    system_prompt = (
+        "あなたはユーザー専属のパーソナルAI、Fairyです。\n"
+        "新しい会話を始めるための、短く自然な挨拶を1つ作ってください。\n\n"
+        "条件：\n"
+        "- 誰にでも通用する内容にする\n"
+        "- 過去の会話、性格、価値観、興味、プロフィールには触れない\n"
+        "- 名前で呼びかける必要はない\n"
+        "- 名前で呼びかける場合は、指定された表示名を一字一句変更せず使う\n"
+        "- 指定された表示名以外の呼び名を作らない\n"
+        "- 質問、雑談への誘い、相談の促し、手伝いの提案など、会話の始め方を毎回少し変える\n"
+        "- 毎回「最近〜」で始めない\n"
+        "- 毎回同じ定型表現を避ける\n"
+        "- 重すぎる質問や、人生観・悩みをいきなり深掘りする質問にしない\n"
+        "- 答えやすく、会話を始めやすい内容にする\n"
+        "- 1〜2文\n"
+        "- 80文字以内\n"
+        "- 挨拶文だけを出力する\n"
+        "- Markdown、JSON、引用符、説明文は出力しない"
+    )
+
+    if display_name:
+        user_msg = f"使用可能な表示名: {display_name}\n呼びかけは任意です。"
+    else:
+        user_msg = "表示名はありません。名前で呼びかけないでください。"
+
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_msg},
+            ],
+            temperature=0.9,
+            max_completion_tokens=100,
+        )
+
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        text = response.choices[0].message.content.strip()
+
+        # Basic validation
+        def invalid_format(s: str) -> bool:
+            if not isinstance(s, str):
+                return True
+            if not s.strip():
+                return True
+            if "```" in s:
+                return True
+            if s.strip().startswith("{") and s.strip().endswith("}"):
+                return True
+            if "<" in s and ">" in s and (s.strip().startswith("<") or s.strip().endswith(">")):
+                return True
+            return False
+
+        # Reject too long (prefer <=80 per spec)
+        length = len(text)
+        used_display_name = False
+        # detect any '〇〇さん' usages and ensure none other than allowed
+        import re
+
+        name_matches = re.findall(r"[^\s、。]*さん", text)
+        if name_matches:
+            # If any name != display_name exactly, invalid
+            for nm in name_matches:
+                if display_name and nm == display_name:
+                    used_display_name = True
+                else:
+                    write_debug_log("initial_greeting_generation_failed", {"reason": "invalid_name", "fallback_used": True})
+                    st.session_state.initial_greeting = fallback
+                    st.session_state.initial_greeting_fallback_used = True
+                    st.session_state.initial_greeting_generated = True
+                    return fallback
+
+        if invalid_format(text):
+            write_debug_log("initial_greeting_generation_failed", {"reason": "invalid_format", "fallback_used": True})
+            st.session_state.initial_greeting = fallback
+            st.session_state.initial_greeting_fallback_used = True
+            st.session_state.initial_greeting_generated = True
+            return fallback
+
+        if length > 80:
+            write_debug_log("initial_greeting_fallback_used", {"session_id": session_id, "reason": "too_long", "fallback_used": True})
+            st.session_state.initial_greeting = fallback
+            st.session_state.initial_greeting_fallback_used = True
+            st.session_state.initial_greeting_generated = True
+            return fallback
+
+        # Passed validations
+        st.session_state.initial_greeting = text
+        st.session_state.initial_greeting_generated = True
+        st.session_state.initial_greeting_fallback_used = False
+        write_debug_log("initial_greeting_generation_finished", {
+            "session_id": session_id,
+            "used_display_name": used_display_name,
+            "greeting_length": length,
+            "finish_reason": finish_reason,
+            "fallback_used": False,
+        })
+        return text
+
+    except Exception as e:
+        write_debug_log("initial_greeting_generation_failed", {"reason": "api_error", "fallback_used": True, "error": str(e)})
+        st.session_state.initial_greeting = fallback
+        st.session_state.initial_greeting_fallback_used = True
+        st.session_state.initial_greeting_generated = True
+        return fallback
 
 
 def extract_json(text: str):
@@ -1591,6 +3304,24 @@ def analyze_user(chat_history):
     conversation = "\n".join(
         [f"[{msg['role']}]: {msg['content']}" for msg in chat_history]
     )
+
+    existing_profile_hint = ""
+    try:
+        user_id = st.session_state.get("user_id")
+        if user_id:
+            existing = load_user_profile(user_id)
+            summary_hint = get_profile_summary_display(existing)
+            if summary_hint:
+                existing_profile_hint = (
+                    "\n\n【Fairyの記憶（補助情報。今回の会話を最優先し、参考程度に使用してください）】\n"
+                    f"これまでの印象: {summary_hint}\n"
+                )
+                vals = existing.get("values", [])
+                if isinstance(vals, list) and vals:
+                    existing_profile_hint += f"大切にしていること: {', '.join(vals)}\n"
+    except Exception:
+        existing_profile_hint = ""
+
     prompt = (
         "あなたはユーザーの性格、価値観、本音を分析するアシスタントです。"
         " 以下の会話履歴から、JSON形式で分析結果を出力してください。\n\n"
@@ -1611,7 +3342,9 @@ def analyze_user(chat_history):
         "- 各項目は100〜180字程度に収めること（summary は80〜140字）\n"
         "- 断定調を避けて「〜かもしれません」「〜の可能性があります」を使うこと\n"
         "- 会話履歴から具体的な引用を1つ含めること\n\n"
-        f"会話履歴:\n{conversation}\n"
+        f"会話履歴:\n{conversation}"
+        + existing_profile_hint
+        + "\n"
     )
     write_debug_log("analysis_started", {"message_count": len(chat_history)})
     try:
@@ -2051,6 +3784,65 @@ def render_support_field(label, value):
         st.write(value)
 
 
+def render_fairy_memory_card(user_id: str):
+    if not user_id:
+        return
+    try:
+        profile = load_user_profile(user_id)
+    except Exception:
+        return
+
+    has_content = (
+        get_profile_summary_text(profile)
+        or (profile.get("values") if isinstance(profile.get("values"), list) and profile.get("values") else None)
+        or profile.get("preferences", {}).get("relationship_style")
+        or get_profile_matching_good_match(profile)
+    )
+    if not has_content:
+        return
+
+    esc = lambda s: html_lib.escape(str(s or "-"))
+    items = []
+    summary_display = get_profile_summary_display(profile)
+    if summary_display:
+        items.append(
+            f'<p><span class="result-label">Fairyの理解:</span> {esc(summary_display)}</p>'
+        )
+    vals = profile.get("values", [])
+    if isinstance(vals, list) and vals:
+        vals_text = "、".join(vals[:5])
+        items.append(
+            f'<p><span class="result-label">大切にしていること:</span> {esc(vals_text)}</p>'
+        )
+    rel = profile.get("preferences", {}).get("relationship_style", "")
+    if rel:
+        items.append(
+            f'<p><span class="result-label">関係スタイル:</span> {esc(rel)}</p>'
+        )
+    good_match = get_profile_matching_good_match(profile)
+    if good_match:
+        items.append(
+            f'<p><span class="result-label">合いそうな相手:</span> {esc(good_match)}</p>'
+        )
+
+    if not items:
+        return
+
+    st.markdown(
+        '<div class="result-card" style="border-left: 4px solid rgba(80,120,220,0.5);'
+        ' background: rgba(220,235,255,0.96);">'
+        '<div class="result-card-title" style="color: #1a3a7c;">'
+        "✨ あなたのFairyが覚えたこと"
+        "</div>"
+        + "".join(items)
+        + '<p class="result-note">'
+        "💡 Fairyはあなたとの会話から少しずつ学んでいます。次回も引き継がれます。"
+        "</p>"
+        "</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def run_matching():
     """
     マッチング処理全体を3段階で実行：
@@ -2081,6 +3873,19 @@ def run_matching():
         else:
             st.warning("マッチ後支援の生成に失敗しました。今後の機能向上にお役立てします。")
 
+    # ステップ4: Fairyプロフィールを更新
+    user_id = st.session_state.get("user_id")
+    if user_id:
+        session_id = get_or_create_session_id()
+        with st.spinner("Fairyがあなたを学習中..."):
+            profile_updated = update_fairy_profile(
+                user_id, st.session_state.messages, session_id
+            )
+        write_debug_log(
+            "profile_update_result",
+            {"user_id": user_id, "success": profile_updated},
+        )
+
     save_session_markdown_log()
     write_debug_log("session_log_saved")
 
@@ -2102,6 +3907,7 @@ def main():
         st.error("OPENAI_API_KEY が設定されていません。.env を確認してください。")
         return
 
+    initialize_user_id()
     ensure_session_state()
 
     # 「終わる」押下後はアンケート案内画面を最優先表示（同意確認より前）
@@ -2249,6 +4055,9 @@ def main():
             unsafe_allow_html=True,
         )
 
+    if st.session_state.get("after_match_support") or st.session_state.get("match_result"):
+        render_fairy_memory_card(st.session_state.get("user_id"))
+
     if st.session_state.match_result and not st.session_state.get("is_processing", False):
         # PC版ボタン（スマホではCSS+JSで非表示、DOMには残してclickNative()が動作）
         st.markdown('<div class="pc-only-btns-post"></div>', unsafe_allow_html=True)
@@ -2272,6 +4081,29 @@ def main():
     # デバッグ情報（開発用）
     # PCでは折りたたみ表示、スマホではJSで非表示にする
     with st.expander("デバッグ情報（開発用）", expanded=False):
+        st.write("user_id:", st.session_state.get("user_id"))
+        st.write("session_id:", st.session_state.get("session_id"))
+        user_id_dbg = st.session_state.get("user_id")
+        if user_id_dbg:
+            profile_path = get_user_profile_path(user_id_dbg)
+            st.write("profile_path:", str(profile_path))
+            st.write("profile_exists:", profile_path.exists())
+            st.write("profile_exists:", profile_path.exists())
+        profile_loaded = False
+        if profile_path.exists():
+            try:
+                profile = load_user_profile(user_id_dbg)
+                profile_loaded = bool(profile and (profile.get("summary") or profile.get("values") or profile.get("preferences") or profile.get("matching_hypothesis")))
+            except Exception as e:
+                st.write("fairy_profile_load_error:", str(e))
+        st.write("profile_loaded:", profile_loaded)
+        st.write("fairy_memory_context_used:", st.session_state.get("fairy_memory_context_used", False))
+        st.write("fairy_memory_context_length:", st.session_state.get("fairy_memory_context_length", 0))
+        st.write("fairy_memory_context_fields:", st.session_state.get("fairy_memory_context_fields", []))
+        st.write("initial_greeting_generated:", st.session_state.get("initial_greeting_generated", False))
+        st.write("initial_greeting_fallback_used:", st.session_state.get("initial_greeting_fallback_used", False))
+        st.write("initial_question_personalized:", st.session_state.get("messages") and st.session_state.get("messages")[0].get("content") != "あなたが最近、楽しかったことや少し気になっていることを教えてください。")
+        st.write("---")
         st.write("messages:", st.session_state.messages)
         st.write("last_analysis_response:", st.session_state.last_analysis_response)
         st.write("last_analysis_error:", st.session_state.last_analysis_error)
