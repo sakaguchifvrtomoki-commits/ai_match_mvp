@@ -1,10 +1,12 @@
 import base64
 import datetime
+import hashlib
 import html as html_lib
 import json
 import math
 import os
 import re
+import shutil
 import traceback
 import uuid
 from copy import deepcopy
@@ -22,8 +24,20 @@ from fairy_memory import build_fairy_memory_context, categorize_profile_interest
 
 load_dotenv()
 
-APP_VERSION = "0.1.3"
-PROFILE_VERSION = "0.1.3"
+APP_VERSION = "0.2.1"
+CURRENT_PROFILE_VERSION = "0.2.1"
+
+
+class ProfileLoadError(Exception):
+    """プロフィールJSONの読み込み・解析に失敗した場合。"""
+
+
+class UnsupportedProfileVersionError(Exception):
+    """未対応の profile_version を検出した場合。"""
+
+
+class ProfileValidationError(Exception):
+    """マイグレーション後のプロフィールが検証に失敗した場合。"""
 
 GOOGLE_FORM_URL = "https://docs.google.com/forms/d/e/1FAIpQLSeEl3FGWUk_-B7CtGLBOq1YNeeRNcClNibd-8ikF_Weh6rE9A/viewform"
 
@@ -779,7 +793,7 @@ def _empty_profile(user_id: str) -> dict:
         "profile_update_count": 0,
         "first_created_at": "",
         "updated_at": "",
-        "profile_version": PROFILE_VERSION,
+        "profile_version": CURRENT_PROFILE_VERSION,
         "summary": {
             "stable": "",
             "recent": "",
@@ -823,15 +837,293 @@ def _empty_profile(user_id: str) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# プロフィールマイグレーション (v0.2.1)
+# ---------------------------------------------------------------------------
+
+_REQUIRED_PROFILE_KEYS = {
+    "user_id": str,
+    "profile_update_count": int,
+    "first_created_at": str,
+    "updated_at": str,
+    "profile_version": str,
+    "summary": dict,
+    "personality_traits": dict,
+    "personality_trait_candidates": dict,
+    "values": list,
+    "preferences": dict,
+    "matching_hypothesis": dict,
+    "confidence": dict,
+    "memory_notes": list,
+    "uncertainties": list,
+    "evidence": list,
+}
+
+
+def create_legacy_canonical_key(category: str, description: str) -> str:
+    source = f"{category}:{_normalize_text(description)}"
+    digest = hashlib.sha256(source.encode("utf-8")).hexdigest()[:16]
+    return f"legacy_{digest}"
+
+
+def _backfill_candidate_canonical_keys(candidates, category: str) -> list:
+    if not isinstance(candidates, list):
+        return []
+    for candidate in candidates:
+        if isinstance(candidate, dict) and not _normalize_text(candidate.get("canonical_key", "")):
+            candidate["canonical_key"] = create_legacy_canonical_key(category, candidate.get("description", ""))
+    return candidates
+
+
+def migrate_010_to_011(profile: dict) -> dict:
+    profile["profile_version"] = "0.1.1"
+    return profile
+
+
+def migrate_011_to_012(profile: dict) -> dict:
+    profile["profile_version"] = "0.1.2"
+    return profile
+
+
+def migrate_012_to_013(profile: dict) -> dict:
+    summary = profile.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        profile["summary"] = summary
+    summary.setdefault("stable_candidates", [])
+    profile["profile_version"] = "0.1.3"
+    return profile
+
+
+def _seed_legacy_candidate_stub(field_list, text: str, category: str) -> list:
+    """
+    候補管理(candidate)導入前の旧プロフィールが持つ「単一のプレーンテキスト」を、
+    候補リストが空の場合に限り1件のcandidateとして種付けする。これを行わないと、
+    次回のマージ時に新しいcandidateのみでdisplay文字列が上書きされ、旧テキストが
+    失われてしまう（既存のconversation_topic_metadataと同じ後方互換パターン）。
+    """
+    if not isinstance(field_list, list):
+        field_list = []
+    text = _normalize_text(text)
+    if text and not field_list:
+        field_list.append({
+            "description": text,
+            "canonical_key": create_legacy_canonical_key(category, text),
+            "status": "candidate",
+            "support_count": 1,
+            "first_seen_session_id": "",
+            "last_seen_session_id": "",
+            "evidence": [],
+            "confidence": 0.0,
+        })
+    return field_list
+
+
+def migrate_013_to_020(profile: dict) -> dict:
+    ptc = profile.setdefault(
+        "personality_trait_candidates",
+        {"communication_style": [], "decision_style": [], "emotional_tendency": []},
+    )
+    if not isinstance(ptc, dict):
+        ptc = {"communication_style": [], "decision_style": [], "emotional_tendency": []}
+        profile["personality_trait_candidates"] = ptc
+    traits = profile.get("personality_traits", {})
+    if not isinstance(traits, dict):
+        traits = {}
+    for field in ["communication_style", "decision_style", "emotional_tendency"]:
+        ptc[field] = _seed_legacy_candidate_stub(
+            ptc.get(field, []), traits.get(field, ""), f"personality_trait.{field}",
+        )
+
+    preferences = profile.setdefault("preferences", {})
+    if not isinstance(preferences, dict):
+        preferences = {}
+        profile["preferences"] = preferences
+    topic_metadata = preferences.get("conversation_topic_metadata", [])
+    if not isinstance(topic_metadata, list):
+        topic_metadata = []
+    if not topic_metadata:
+        for topic in (preferences.get("conversation_topics") or []):
+            topic_text = _normalize_text(topic)
+            if not topic_text:
+                continue
+            topic_metadata.append({
+                "canonical_key": _normalize_canonical_key("", topic_text),
+                "display_name": topic_text,
+                "support_count": 1,
+                "first_seen_session_id": "",
+                "last_seen_session_id": "",
+                "evidence": [],
+                "importance": 1,
+            })
+    preferences["conversation_topic_metadata"] = topic_metadata
+
+    matching = profile.setdefault("matching_hypothesis", {})
+    if not isinstance(matching, dict):
+        matching = {}
+        profile["matching_hypothesis"] = matching
+    matching.setdefault("reasoning_history_entries", [])
+    matching.setdefault("stable_candidates", [])
+
+    summary = profile.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        profile["summary"] = summary
+    summary["stable_candidates"] = _backfill_candidate_canonical_keys(
+        summary.get("stable_candidates", []), "summary.stable",
+    )
+
+    profile["profile_version"] = "0.2.0"
+    return profile
+
+
+def migrate_020_to_021(profile: dict) -> dict:
+    summary = profile.setdefault("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+        profile["summary"] = summary
+    summary["stable_candidates"] = _backfill_candidate_canonical_keys(
+        summary.get("stable_candidates", []), "summary.stable",
+    )
+
+    matching = profile.setdefault("matching_hypothesis", {})
+    if not isinstance(matching, dict):
+        matching = {}
+        profile["matching_hypothesis"] = matching
+    matching["stable_candidates"] = _backfill_candidate_canonical_keys(
+        matching.get("stable_candidates", []), "matching_hypothesis.stable_good_match",
+    )
+
+    ptc = profile.setdefault(
+        "personality_trait_candidates",
+        {"communication_style": [], "decision_style": [], "emotional_tendency": []},
+    )
+    if not isinstance(ptc, dict):
+        ptc = {"communication_style": [], "decision_style": [], "emotional_tendency": []}
+        profile["personality_trait_candidates"] = ptc
+    for field in ["communication_style", "decision_style", "emotional_tendency"]:
+        field_list = ptc.get(field, [])
+        if not isinstance(field_list, list):
+            field_list = []
+        ptc[field] = _backfill_candidate_canonical_keys(field_list, f"personality_trait.{field}")
+
+    preferences = profile.setdefault("preferences", {})
+    if not isinstance(preferences, dict):
+        preferences = {}
+        profile["preferences"] = preferences
+    preferences.setdefault("conversation_topic_metadata", [])
+
+    profile["profile_version"] = "0.2.1"
+    return profile
+
+
+MIGRATIONS = {
+    "0.1.0": migrate_010_to_011,
+    "0.1.1": migrate_011_to_012,
+    "0.1.2": migrate_012_to_013,
+    "0.1.3": migrate_013_to_020,
+    "0.2.0": migrate_020_to_021,
+}
+
+
+def migrate_profile(profile: dict) -> dict:
+    profile = deepcopy(profile)
+    version = profile.get("profile_version", "0.1.0")
+
+    while version != CURRENT_PROFILE_VERSION:
+        migration = MIGRATIONS.get(version)
+
+        if migration is None:
+            raise UnsupportedProfileVersionError(
+                f"未対応のプロフィールバージョンです: {version}"
+            )
+
+        profile = migration(profile)
+        version = profile["profile_version"]
+
+    return profile
+
+
+def validate_profile(profile: dict) -> None:
+    if not isinstance(profile, dict):
+        raise ProfileValidationError("プロフィールが辞書型ではありません")
+    if not _normalize_text(profile.get("user_id", "")):
+        raise ProfileValidationError("user_idが空です")
+    for key, expected_type in _REQUIRED_PROFILE_KEYS.items():
+        if key not in profile or not isinstance(profile[key], expected_type):
+            raise ProfileValidationError(f"必須項目が不正です: {key}")
+    if profile.get("profile_version") != CURRENT_PROFILE_VERSION:
+        raise ProfileValidationError(
+            f"profile_versionが最新ではありません: {profile.get('profile_version')}"
+        )
+
+
+def get_profile_migration_log_path() -> Path:
+    base = Path(__file__).parent / "logs" / APP_VERSION / "profile_migration"
+    base.mkdir(parents=True, exist_ok=True)
+    return base / "migration.jsonl"
+
+
+def write_profile_migration_log(entry: dict) -> None:
+    try:
+        path = get_profile_migration_log_path()
+        entry = {"ts": datetime.datetime.now().isoformat(timespec="seconds"), **entry}
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _copy_pre_migration_backup(path: Path) -> Path:
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    backup_path = path.with_suffix(f".{timestamp}.pre_migration.bak")
+    shutil.copy2(path, backup_path)
+    return backup_path
+
+
+def atomic_save_profile(path: Path, profile: dict) -> None:
+    temp_path = path.with_suffix(".json.tmp")
+
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(profile, f, ensure_ascii=False, indent=2)
+
+    with open(temp_path, encoding="utf-8") as f:
+        saved = json.load(f)
+    validate_profile(saved)
+
+    if saved.get("user_id") != profile.get("user_id"):
+        raise ValueError("user_idが一致しません")
+
+    temp_path.replace(path)
+
+
 def load_user_profile(user_id: str) -> dict:
     path = get_user_profile_path(user_id)
     if not path.exists():
         return _empty_profile(user_id)
+
     try:
         with open(path, encoding="utf-8") as f:
-            profile = json.load(f)
-        if not isinstance(profile, dict):
+            raw_profile = json.load(f)
+        if not isinstance(raw_profile, dict):
             raise ValueError("プロフィールが辞書型ではありません")
+    except Exception as e:
+        write_debug_log("user_profile_load_failed", {"user_id": user_id, "error": str(e)})
+        raise ProfileLoadError(f"プロフィールの読み込みに失敗しました: {e}") from e
+
+    from_version = raw_profile.get("profile_version", "0.1.0")
+    needs_migration = from_version != CURRENT_PROFILE_VERSION
+    started_at = datetime.datetime.now().isoformat(timespec="seconds")
+    backup_path = None
+
+    if needs_migration:
+        try:
+            backup_path = _copy_pre_migration_backup(path)
+        except Exception as e:
+            write_debug_log("profile_pre_migration_backup_failed", {"user_id": user_id, "error": str(e)})
+
+    try:
+        profile = migrate_profile(raw_profile)
         profile["summary"] = normalize_summary(profile.get("summary", ""))
         profile["matching_hypothesis"] = normalize_matching_hypothesis(profile.get("matching_hypothesis", {}))
         if not isinstance(profile.get("personality_trait_candidates", {}), dict):
@@ -854,24 +1146,54 @@ def load_user_profile(user_id: str) -> dict:
         if not isinstance(mh.get("stable_candidates", []), list):
             mh["stable_candidates"] = []
         profile["matching_hypothesis"] = mh
-        return profile
+        validate_profile(profile)
     except Exception as e:
+        write_profile_migration_log({
+            "user_id": user_id,
+            "from_version": from_version,
+            "to_version": CURRENT_PROFILE_VERSION,
+            "started_at": started_at,
+            "finished_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "status": "failure",
+            "error_type": type(e).__name__,
+            "backup_path": str(backup_path) if backup_path else "",
+        })
+        write_debug_log("user_profile_migration_failed", {"user_id": user_id, "error": str(e)})
+        raise
+
+    if needs_migration:
         try:
-            backup_path = path.with_suffix(
-                f".{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.bak"
-            )
-            path.rename(backup_path)
-        except Exception:
-            pass
-        write_debug_log("user_profile_load_failed", {"user_id": user_id, "error": str(e)})
-        return _empty_profile(user_id)
+            atomic_save_profile(path, profile)
+        except Exception as e:
+            write_profile_migration_log({
+                "user_id": user_id,
+                "from_version": from_version,
+                "to_version": CURRENT_PROFILE_VERSION,
+                "started_at": started_at,
+                "finished_at": datetime.datetime.now().isoformat(timespec="seconds"),
+                "status": "failure",
+                "error_type": type(e).__name__,
+                "backup_path": str(backup_path) if backup_path else "",
+            })
+            write_debug_log("user_profile_migration_save_failed", {"user_id": user_id, "error": str(e)})
+            raise
+        write_profile_migration_log({
+            "user_id": user_id,
+            "from_version": from_version,
+            "to_version": CURRENT_PROFILE_VERSION,
+            "started_at": started_at,
+            "finished_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "status": "success",
+            "backup_path": str(backup_path) if backup_path else "",
+        })
+
+    return profile
 
 
 def save_user_profile(user_id: str, profile: dict) -> bool:
     try:
         path = get_user_profile_path(user_id)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(profile, f, ensure_ascii=False, indent=2)
+        atomic_save_profile(path, profile)
         return True
     except Exception as e:
         write_debug_log("user_profile_save_failed", {"user_id": user_id, "error": str(e)})
@@ -1591,16 +1913,151 @@ def _resolve_trait_value(existing_value, new_value, corrections, field_name):
     return _merge_trait_text(existing_value, new_value)
 
 
+def recover_reset_profile(old_profile: dict, reset_profile: dict, session_id: str) -> dict:
+    """
+    v0.2.0のバグにより、既に存在した旧プロフィールを継承せず新規プロフィールとして
+    上書き生成されてしまったケースを復旧する。
+
+    old_profile: マイグレーション済みの旧プロフィール（バグの影響を受ける前のデータ）。
+    reset_profile: バグにより誤って新規生成されたプロフィール（実質「このセッションで
+        抽出された内容」を体現する、既にmerge_user_profiles済みの完成形profile）。
+    session_id: reset_profile が作られた際のセッションID。
+    """
+    old = deepcopy(old_profile)
+    old_summary = normalize_summary(old.get("summary", ""))
+    old_mh = normalize_matching_hypothesis(old.get("matching_hypothesis", {}))
+    reset_summary = reset_profile.get("summary", {}) if isinstance(reset_profile.get("summary", {}), dict) else {}
+    reset_mh = reset_profile.get("matching_hypothesis", {}) if isinstance(reset_profile.get("matching_hypothesis", {}), dict) else {}
+    reset_confidence = reset_profile.get("confidence", {}) if isinstance(reset_profile.get("confidence", {}), dict) else {}
+
+    recovered = deepcopy(old)
+    recovered["user_id"] = old.get("user_id", reset_profile.get("user_id", ""))
+    recovered["updated_at"] = reset_profile.get("updated_at") or datetime.datetime.now().isoformat(timespec="seconds")
+
+    stable_candidates = [c for c in old_summary.get("stable_candidates", []) if isinstance(c, dict)]
+    for candidate in reset_summary.get("stable_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        stable_candidates = _merge_candidate_entry(
+            stable_candidates,
+            candidate.get("description", ""),
+            session_id,
+            candidate.get("confidence", 0.0),
+            canonical_key=candidate.get("canonical_key", ""),
+        )
+    recovered["summary"] = {
+        "stable": _choose_summary_stable_text(old_summary.get("stable", ""), stable_candidates),
+        "recent": _merge_profile_scalar(old_summary.get("recent", ""), reset_summary.get("recent", "")),
+        "growth": _merge_profile_scalar(old_summary.get("growth", ""), reset_summary.get("growth", "")),
+        "tensions": _merge_profile_list(old_summary.get("tensions", []), reset_summary.get("tensions", []), limit=15),
+        "stable_candidates": stable_candidates,
+    }
+
+    old_ptc = old.get("personality_trait_candidates", {})
+    if not isinstance(old_ptc, dict):
+        old_ptc = {}
+    reset_ptc = reset_profile.get("personality_trait_candidates", {})
+    if not isinstance(reset_ptc, dict):
+        reset_ptc = {}
+    merged_ptc = {}
+    merged_traits = {}
+    for field in ["communication_style", "decision_style", "emotional_tendency"]:
+        field_candidates = [c for c in (old_ptc.get(field) or []) if isinstance(c, dict)]
+        for candidate in (reset_ptc.get(field) or []):
+            if not isinstance(candidate, dict):
+                continue
+            field_candidates = _merge_candidate_entry(
+                field_candidates,
+                candidate.get("description", ""),
+                session_id,
+                candidate.get("confidence", 0.0),
+                canonical_key=candidate.get("canonical_key", ""),
+            )
+        merged_ptc[field] = field_candidates
+        display = _trait_display_from_candidates(field_candidates)
+        merged_traits[field] = display or _merge_trait_text(
+            old.get("personality_traits", {}).get(field, ""),
+            reset_profile.get("personality_traits", {}).get(field, ""),
+        )
+    recovered["personality_trait_candidates"] = merged_ptc
+    recovered["personality_traits"] = merged_traits
+
+    recovered["values"] = _merge_profile_list(old.get("values", []), reset_profile.get("values", []), limit=10)
+
+    old_preferences = old.get("preferences", {}) if isinstance(old.get("preferences", {}), dict) else {}
+    reset_preferences = reset_profile.get("preferences", {}) if isinstance(reset_profile.get("preferences", {}), dict) else {}
+    topic_meta = [m for m in old_preferences.get("conversation_topic_metadata", []) if isinstance(m, dict)]
+    for meta in reset_preferences.get("conversation_topic_metadata", []):
+        if not isinstance(meta, dict):
+            continue
+        topic_meta = _merge_topic_metadata(
+            topic_meta, meta.get("display_name", ""), meta.get("canonical_key", ""), session_id,
+        )
+    recovered["preferences"] = {
+        "relationship_style": _merge_profile_scalar(
+            old_preferences.get("relationship_style", ""), reset_preferences.get("relationship_style", ""),
+        ),
+        "conversation_topics": [m.get("display_name", "") for m in topic_meta if m.get("display_name")],
+        "dislikes": _merge_profile_list(
+            old_preferences.get("dislikes", []), reset_preferences.get("dislikes", []), limit=15,
+        ),
+        "conversation_topic_metadata": topic_meta,
+    }
+
+    mh_candidates = [c for c in old_mh.get("stable_candidates", []) if isinstance(c, dict)]
+    for candidate in reset_mh.get("stable_candidates", []):
+        if not isinstance(candidate, dict):
+            continue
+        mh_candidates = _merge_candidate_entry(
+            mh_candidates,
+            candidate.get("description", ""),
+            session_id,
+            candidate.get("confidence", 0.0),
+            canonical_key=candidate.get("canonical_key", ""),
+        )
+    recovered["matching_hypothesis"] = {
+        "stable_good_match": old_mh.get("stable_good_match", "") or reset_mh.get("stable_good_match", ""),
+        "recent_good_match": _merge_profile_scalar(
+            old_mh.get("recent_good_match", ""), reset_mh.get("recent_good_match", ""),
+        ),
+        "likely_bad_match": _merge_profile_scalar(
+            old_mh.get("likely_bad_match", ""), reset_mh.get("likely_bad_match", ""),
+        ),
+        "reasoning_history": old_mh.get("reasoning_history", []),
+        "reasoning_history_entries": _merge_reasoning_history_entries(
+            old_mh.get("reasoning_history_entries", []),
+            [e.get("text", "") for e in reset_mh.get("reasoning_history_entries", []) if isinstance(e, dict)],
+            session_id,
+        ),
+        "stable_candidates": mh_candidates,
+    }
+
+    recovered["confidence"] = {
+        key: _merge_confidence(old.get("confidence", {}).get(key, 0.0), reset_confidence.get(key, 0.0))
+        for key in ["summary", "values", "matching_hypothesis"]
+    }
+
+    recovered["memory_notes"] = _merge_profile_list(old.get("memory_notes", []), reset_profile.get("memory_notes", []))
+    recovered["uncertainties"] = _merge_profile_list(old.get("uncertainties", []), reset_profile.get("uncertainties", []))
+    recovered["evidence"] = _merge_evidence_list(old.get("evidence", []), [session_id], limit=10)
+
+    recovered["profile_update_count"] = int(old.get("profile_update_count", 0)) + 1
+    recovered["first_created_at"] = old.get("first_created_at", "")
+    recovered["profile_version"] = CURRENT_PROFILE_VERSION
+
+    return recovered
+
+
 def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> dict:
     merged = deepcopy(existing)
 
     _existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
     if session_id and session_id in _existing_evidence:
-        merged["profile_version"] = PROFILE_VERSION
+        merged["profile_version"] = CURRENT_PROFILE_VERSION
         return merged
 
     merged["user_id"] = existing.get("user_id", new_profile.get("user_id", ""))
-    merged["profile_version"] = PROFILE_VERSION
+    merged["profile_version"] = CURRENT_PROFILE_VERSION
     merged["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
 
     if _is_profile_diff_payload(new_profile):
@@ -2098,7 +2555,7 @@ def extract_fairy_profile(
 
             profile["user_id"] = user_id
             profile["updated_at"] = datetime.datetime.now().isoformat(timespec="seconds")
-            profile["profile_version"] = PROFILE_VERSION
+            profile["profile_version"] = CURRENT_PROFILE_VERSION
             return profile
         except Exception as e:
             write_debug_log(
@@ -3885,6 +4342,10 @@ def run_matching():
             "profile_update_result",
             {"user_id": user_id, "success": profile_updated},
         )
+        if not profile_updated:
+            st.warning(
+                "プロフィールの更新に失敗しました。元のプロフィールは変更されていません。"
+            )
 
     save_session_markdown_log()
     write_debug_log("session_log_saved")
