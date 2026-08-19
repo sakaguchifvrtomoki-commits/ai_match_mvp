@@ -169,4 +169,4 @@ def test_endpoints_after_sessions_step_are_not_added():
 
     assert "/chat" in paths
     assert "/match" in paths
-    assert "/sessions/{session_id}/end" not in paths
+    assert "/sessions/{session_id}/end" in paths

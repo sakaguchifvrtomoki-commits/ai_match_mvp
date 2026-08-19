@@ -335,7 +335,28 @@ FastAPIは受け取った `messages` をレスポンスへ含めず、保存・�
 - 終了処理または最終ログ保存に失敗した場合は `SESSION_END_FAILED` を返す。
 - 失敗時もFlutter側の画面状態と一時データを維持し、再試行可能にする。
 
-リクエスト本文と成功レスポンスの詳細スキーマは、このAPIの実装時に確定する。
+### 9.3 Request
+
+```json
+{
+  "user_id": "user_xxxxx",
+  "messages": [],
+  "analysis": null,
+  "match": null,
+  "top_candidates": [],
+  "after_match_support": null
+}
+```
+
+`user_id` と `messages` は必須。分析前に終了できるため、分析・マッチ・マッチ後支援は任意とする。存在する場合は `POST /match` のResponseと同じ構造を送る。開始時刻と同意情報は `POST /sessions` が保存したセッションメタデータを使用する。
+
+### 9.4 Response
+
+```json
+{"status": "completed"}
+```
+
+成功時は `session_status=completed`、`end_reason=user_clicked_finish`、終了時刻を `ended_at` に記録する。FastAPIはFlutterの一時状態を削除しない。保存失敗時はHTTP 500と `SESSION_END_FAILED` を返す。
 
 ## 10. プロフィールmigration方針
 

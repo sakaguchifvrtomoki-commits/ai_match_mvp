@@ -107,4 +107,4 @@ def test_session_log_is_saved_after_profile_update(monkeypatch):
 
 
 def test_end_endpoint_is_still_unimplemented():
-    assert "/sessions/{session_id}/end" not in {route.path for route in app.routes}
+    assert "/sessions/{session_id}/end" in {route.path for route in app.routes}

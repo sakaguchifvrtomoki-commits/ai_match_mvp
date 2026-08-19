@@ -17,8 +17,11 @@ from api.schemas import (
     MatchResponse,
     SessionCreateRequest,
     SessionCreateResponse,
+    SessionEndRequest,
+    SessionEndResponse,
 )
 from api.match_service import AnalysisFailed, InsufficientMessages, MatchingFailed, run_match
+from api.session_end_service import SessionEndFailed, end_session
 from api.session_service import InvalidSessionRequest, SessionStartError, start_session
 
 app = FastAPI(
@@ -110,3 +113,16 @@ def match(payload: MatchRequest):
     except Exception:
         return error_response(502, "MATCHING_FAILED", "マッチングに失敗しました。再試行してください。")
     return MatchResponse(**result.__dict__)
+
+
+@app.post("/sessions/{session_id}/end", response_model=SessionEndResponse)
+def finish_session(session_id: str, payload: SessionEndRequest):
+    try:
+        end_session(session_id, payload.model_dump())
+    except InvalidChatRequest as exc:
+        return error_response(400, "INVALID_REQUEST", str(exc))
+    except SessionEndFailed as exc:
+        return error_response(500, "SESSION_END_FAILED", str(exc))
+    except Exception:
+        return error_response(500, "SESSION_END_FAILED", "セッションを終了できませんでした。")
+    return SessionEndResponse()

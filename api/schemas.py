@@ -91,6 +91,19 @@ class MatchResponse(BaseModel):
     profile_updated: bool
 
 
+class SessionEndRequest(BaseModel):
+    user_id: str = Field(..., min_length=1)
+    messages: list[ChatMessage]
+    analysis: AnalysisResponse | None = None
+    match: MatchResultResponse | None = None
+    top_candidates: list[TopCandidateResponse] = Field(default_factory=list)
+    after_match_support: AfterMatchSupportResponse | None = None
+
+
+class SessionEndResponse(BaseModel):
+    status: Literal["completed"] = "completed"
+
+
 class SessionCreateResponse(BaseModel):
     user_id: str
     session_id: str

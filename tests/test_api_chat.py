@@ -193,4 +193,4 @@ def test_only_chat_endpoint_is_added_for_this_step():
 
     assert "/chat" in paths
     assert "/match" in paths
-    assert "/sessions/{session_id}/end" not in paths
+    assert "/sessions/{session_id}/end" in paths
