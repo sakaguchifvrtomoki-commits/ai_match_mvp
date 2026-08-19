@@ -255,13 +255,16 @@ FastAPIは受け取った `messages` をレスポンスへ含めず、保存・�
 
 会話履歴からユーザーを分析し、候補者とのマッチング、マッチ後支援、Fairyプロフィール更新、セッションログ保存を行う。
 
-### 8.2 Request概念
+### 8.2 Request
 
 ```json
 {
   "user_id": "user_xxxxx",
   "session_id": "session_xxxxx",
-  "messages": []
+  "messages": [
+    {"role": "assistant", "content": "..."},
+    {"role": "user", "content": "..."}
+  ]
 }
 ```
 
@@ -285,7 +288,37 @@ FastAPIは受け取った `messages` をレスポンスへ含めず、保存・�
 - プロフィール更新の成否はレスポンス内の `profile_updated` で表し、失敗時は `false` とする。
 - プロフィール読み込みに失敗した場合は、空プロフィールで既存プロフィールを上書きしない。
 
-レスポンスの分析、マッチ結果、マッチ後支援の詳細スキーマは、既存v0.2.1の出力を確認した上で `POST /match` 実装時に確定する。
+### 8.5 Response
+
+```json
+{
+  "analysis": {
+    "personality": "...", "values": "...", "hidden_needs": "...",
+    "communication_style": "...", "ideal_partner_type": "...", "summary": "..."
+  },
+  "match": {
+    "matched_candidate": {
+      "id": "c01", "name": "葵", "age": 29, "personality": "...", "values": "...",
+      "hobbies": "...", "communication_style": "...", "relationship_style": "...", "description": "..."
+    },
+    "match_score": 85,
+    "match_label": "安心感重視タイプ",
+    "match_reason": "...",
+    "possible_concern": "...",
+    "recommended_first_message": "..."
+  },
+  "top_candidates": [
+    {"candidate": {"id": "c01", "name": "葵", "age": 29, "personality": "...", "values": "...", "hobbies": "...", "communication_style": "...", "relationship_style": "...", "description": "..."}, "similarity": 0.85}
+  ],
+  "after_match_support": {
+    "first_message_today": "...", "question_in_3days": "...",
+    "avoid_phrase": "...", "slow_reply_action": "..."
+  },
+  "profile_updated": true
+}
+```
+
+`top_candidates` は既存v0.2.1が保持する上位3件の `{candidate, similarity}` を返す。マッチ後支援に失敗した場合は `after_match_support=null`、プロフィール更新に失敗した場合は `profile_updated=false` とする。
 
 ## 9. `POST /sessions/{session_id}/end`
 

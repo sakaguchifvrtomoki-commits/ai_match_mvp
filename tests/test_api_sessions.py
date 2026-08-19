@@ -168,5 +168,5 @@ def test_endpoints_after_sessions_step_are_not_added():
     paths = {route.path for route in app.routes}
 
     assert "/chat" in paths
-    assert "/match" not in paths
+    assert "/match" in paths
     assert "/sessions/{session_id}/end" not in paths

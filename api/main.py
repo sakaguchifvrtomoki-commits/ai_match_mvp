@@ -13,9 +13,12 @@ from api.schemas import (
     ChatRequest,
     ChatResponse,
     MessageResponse,
+    MatchRequest,
+    MatchResponse,
     SessionCreateRequest,
     SessionCreateResponse,
 )
+from api.match_service import AnalysisFailed, InsufficientMessages, MatchingFailed, run_match
 from api.session_service import InvalidSessionRequest, SessionStartError, start_session
 
 app = FastAPI(
@@ -89,3 +92,21 @@ def chat(payload: ChatRequest):
         return error_response(502, "AI_RESPONSE_FAILED", "Fairyから応答を取得できませんでした。")
 
     return ChatResponse(message=MessageResponse(content=reply.content))
+
+
+@app.post("/match", response_model=MatchResponse)
+def match(payload: MatchRequest):
+    try:
+        result = run_match(payload.user_id, payload.session_id,
+                           [message.model_dump() for message in payload.messages])
+    except InvalidChatRequest as exc:
+        return error_response(400, "INVALID_REQUEST", str(exc))
+    except InsufficientMessages:
+        return error_response(400, "INSUFFICIENT_MESSAGES", "分析には3件以上のユーザー発言が必要です。")
+    except AnalysisFailed:
+        return error_response(502, "ANALYSIS_FAILED", "人物分析に失敗しました。再試行してください。")
+    except MatchingFailed:
+        return error_response(502, "MATCHING_FAILED", "マッチングに失敗しました。再試行してください。")
+    except Exception:
+        return error_response(502, "MATCHING_FAILED", "マッチングに失敗しました。再試行してください。")
+    return MatchResponse(**result.__dict__)
