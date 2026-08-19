@@ -396,6 +396,12 @@ Drive内の保存先ルートは `GOOGLE_DRIVE_ROOT_FOLDER_ID` で指定する�
 
 フォルダは名前だけで判定せず、My Drive直下、folder MIME、`data_type=fairies_test_root`、`app_id=fairies_v0_2_2` のappPropertiesで識別する。同じ識別情報のフォルダが1件あれば再利用し、複数件あれば競合として作成を中止する。取得したIDは後続の実Driveテストで `GOOGLE_DRIVE_ROOT_FOLDER_ID` に設定する。本番データの移行や既存Driveファイルの操作は行わない。
 
+### 12.2 開発用OAuth再認証
+
+既存tokenが失効してrefreshできない場合は、開発者が `scripts/authorize_google_drive.py` を明示的に実行する。対話的認証はFastAPIおよび `GoogleDriveStorage` へ組み込まず、Desktop app用OAuth client JSONを使用して `InstalledAppFlow.run_local_server(port=0)` で行う。scopeは `https://www.googleapis.com/auth/drive.file` から拡張しない。
+
+OAuth clientファイルは `GOOGLE_OAUTH_CLIENT_FILE`、保存先は `GOOGLE_OAUTH_TOKEN_FILE` で指定する。既存tokenがある場合は通常実行を拒否し、`--force` を明示した場合だけ、タイムスタンプ付きバックアップを作成してからアトミックに置換する。保存前にrefresh tokenと `drive.file` scopeを検証する。token値は標準出力へ表示しない。この処理は認証tokenの取得だけを行い、Drive上のファイルやフォルダは作成しない。
+
 ## 13. v0.2.2 完了条件
 
 FlutterとFastAPIを使用して、以下の一連の流れを動作確認できることを完了条件とする。

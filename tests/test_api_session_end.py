@@ -58,8 +58,10 @@ def test_missing_required_request_field(missing):
 
 
 def test_log_failure_returns_retryable_error(monkeypatch):
-    monkeypatch.setattr(session_end_service, "_find_session_files",
-                        lambda session_id: (_ for _ in ()).throw(session_end_service.SessionEndFailed("保存失敗")))
+    class FailedStorage:
+        def load_session(self, session_id):
+            raise session_end_service.StorageError("保存失敗")
+    monkeypatch.setattr(session_end_service, "get_storage", lambda: FailedStorage())
     response = client.post(f"/sessions/{SESSION_ID}/end", json=BODY)
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "SESSION_END_FAILED"

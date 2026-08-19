@@ -12,6 +12,7 @@ logs/
 .claude/settings.local.json
 streamlit_test.log
 oauth_client_secret.json
+credentials.json
 token.json
 get_google_refresh_token.py
 user_profiles/
