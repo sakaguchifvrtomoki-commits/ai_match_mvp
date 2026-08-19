@@ -196,7 +196,7 @@ Streamlit版の `get_or_create_session_id()` のような暗黙の状態管理�
 
 Flutterが保持する会話履歴と既存Fairyプロフィールを使用し、次のFairy応答を生成する。
 
-### 7.2 Request概念
+### 7.2 Request
 
 ```json
 {
@@ -225,7 +225,29 @@ Flutterが保持する会話履歴と既存Fairyプロフィールを使用し�
 - AIや内部処理のエラー文字列をFairyの発言として返したり、`messages` に追加したりしない。
 - 失敗時は共通エラー形式を返し、Flutterが元の会話履歴を保持したまま再試行できるようにする。
 
-レスポンスの詳細スキーマは `POST /chat` 実装時に確定する。
+### 7.4 Response
+
+```json
+{
+  "message": {
+    "role": "assistant",
+    "content": "Fairyの返答"
+  }
+}
+```
+
+FastAPIは受け取った `messages` をレスポンスへ含めず、保存・変更もしない。Flutterは成功時に返された `message` を端末上の会話履歴へ追加する。
+
+### 7.5 エラー
+
+| 条件 | HTTP status | code |
+| --- | --- | --- |
+| リクエストまたはIDの形式が不正 | 400 | `INVALID_REQUEST` |
+| コンテキスト上限超過を明確に判定できた | 413 | `AI_CONTEXT_TOO_LONG` |
+| AI応答が出力上限により途中で切れた | 502 | `AI_RESPONSE_TRUNCATED` |
+| API未設定、通信失敗、空応答、その他のAI失敗 | 502 | `AI_RESPONSE_FAILED` |
+
+エラー本文を会話メッセージとして返さない。エラー時もリクエストの `messages` は保存・変更しない。
 
 ## 8. `POST /match`
 

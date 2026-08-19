@@ -164,9 +164,9 @@ def test_log_write_failure_returns_error_and_does_not_call_ai(monkeypatch):
     assert not ai_called
 
 
-def test_unimplemented_endpoints_are_not_added():
+def test_endpoints_after_sessions_step_are_not_added():
     paths = {route.path for route in app.routes}
 
-    assert "/chat" not in paths
+    assert "/chat" in paths
     assert "/match" not in paths
     assert "/sessions/{session_id}/end" not in paths

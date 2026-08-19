@@ -2,7 +2,20 @@ from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from api.schemas import MessageResponse, SessionCreateRequest, SessionCreateResponse
+from api.chat_service import (
+    AIContextTooLong,
+    AIResponseFailed,
+    AIResponseTruncated,
+    InvalidChatRequest,
+    generate_chat_reply,
+)
+from api.schemas import (
+    ChatRequest,
+    ChatResponse,
+    MessageResponse,
+    SessionCreateRequest,
+    SessionCreateResponse,
+)
 from api.session_service import InvalidSessionRequest, SessionStartError, start_session
 
 app = FastAPI(
@@ -54,3 +67,25 @@ def create_session(payload: SessionCreateRequest):
         session_id=started.session_id,
         message=MessageResponse(content=started.greeting),
     )
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(payload: ChatRequest):
+    try:
+        reply = generate_chat_reply(
+            payload.user_id,
+            payload.session_id,
+            [message.model_dump() for message in payload.messages],
+        )
+    except InvalidChatRequest as exc:
+        return error_response(400, "INVALID_REQUEST", str(exc))
+    except AIResponseTruncated as exc:
+        return error_response(502, "AI_RESPONSE_TRUNCATED", str(exc))
+    except AIContextTooLong as exc:
+        return error_response(413, "AI_CONTEXT_TOO_LONG", str(exc))
+    except AIResponseFailed as exc:
+        return error_response(502, "AI_RESPONSE_FAILED", str(exc))
+    except Exception:
+        return error_response(502, "AI_RESPONSE_FAILED", "Fairyから応答を取得できませんでした。")
+
+    return ChatResponse(message=MessageResponse(content=reply.content))
