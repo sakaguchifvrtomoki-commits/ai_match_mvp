@@ -2,13 +2,25 @@ import datetime
 import io
 import json
 import os
+from pathlib import Path
 from typing import Any
 
+import google.auth as google_auth
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
-from api.storage.base import Conflict, InvalidData, NotFound, SessionData, Storage, Unavailable
+from api.storage.base import (
+    Conflict,
+    InvalidData,
+    NotFound,
+    SessionData,
+    Storage,
+    StorageConfigurationError,
+    Unavailable,
+)
 
 
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -36,17 +48,77 @@ class GoogleDriveStorage(Storage):
         root = os.getenv("GOOGLE_DRIVE_ROOT_FOLDER_ID", "").strip()
         if not root:
             raise Unavailable("GOOGLE_DRIVE_ROOT_FOLDER_ID is not configured")
+
+        return cls(cls.build_service_from_env(), root)
+
+    @classmethod
+    def build_service_from_env(cls):
+        """Build a Drive client without requiring a storage root folder."""
+
+        auth_mode = os.getenv("GOOGLE_DRIVE_AUTH_MODE", "auto").strip().lower()
+        if auth_mode not in {"auto", "user_oauth", "service_account", "adc"}:
+            raise StorageConfigurationError(
+                f"Unknown GOOGLE_DRIVE_AUTH_MODE: {auth_mode}"
+            )
+
         try:
             raw = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
-            if raw:
+            if auth_mode == "user_oauth":
+                credentials = cls._load_user_oauth_credentials()
+            elif auth_mode == "service_account":
+                if not raw:
+                    raise Unavailable("GOOGLE_SERVICE_ACCOUNT_JSON is not configured")
+                info = json.loads(raw)
+                credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
+            elif auth_mode == "adc":
+                credentials, _ = google_auth.default(scopes=SCOPES)
+            elif raw:
                 info = json.loads(raw)
                 credentials = service_account.Credentials.from_service_account_info(info, scopes=SCOPES)
             else:
-                import google.auth
-                credentials, _ = google.auth.default(scopes=SCOPES)
-            return cls(build("drive", "v3", credentials=credentials, cache_discovery=False), root)
+                credentials, _ = google_auth.default(scopes=SCOPES)
+            return build("drive", "v3", credentials=credentials, cache_discovery=False)
+        except (StorageConfigurationError, Unavailable):
+            raise
         except Exception as exc:
             raise Unavailable("Google Drive authentication failed") from exc
+
+    @classmethod
+    def _load_user_oauth_credentials(cls) -> Credentials:
+        raw = os.getenv("GOOGLE_OAUTH_CREDENTIALS_JSON", "").strip()
+        if raw:
+            try:
+                info = json.loads(raw)
+            except (TypeError, ValueError) as exc:
+                raise Unavailable("Google OAuth token JSON is invalid") from exc
+        else:
+            token_path = Path(os.getenv("GOOGLE_OAUTH_TOKEN_FILE", "token.json"))
+            try:
+                info = json.loads(token_path.read_text(encoding="utf-8"))
+            except FileNotFoundError as exc:
+                raise Unavailable(
+                    f"Google OAuth token file was not found: {token_path}"
+                ) from exc
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise Unavailable("Google OAuth token file could not be read") from exc
+
+        if not isinstance(info, dict):
+            raise Unavailable("Google OAuth token JSON is invalid")
+        try:
+            credentials = Credentials.from_authorized_user_info(info, scopes=SCOPES)
+        except Exception as exc:
+            raise Unavailable("Google OAuth token JSON is invalid") from exc
+
+        if not credentials.valid:
+            if not credentials.refresh_token:
+                raise Unavailable("Google OAuth refresh token is not available")
+            try:
+                credentials.refresh(Request())
+            except Exception as exc:
+                raise Unavailable("Google OAuth token refresh failed") from exc
+            if not credentials.valid:
+                raise Unavailable("Google OAuth token remains invalid after refresh")
+        return credentials
 
     def _execute(self, request):
         try:

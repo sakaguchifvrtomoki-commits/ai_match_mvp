@@ -377,7 +377,26 @@ FastAPIは受け取った `messages` をレスポンスへ含めず、保存・�
 - エラー時にFlutterが会話や画面状態を維持して再試行できるレスポンスであることを確認する。
 - Google Driveの読み込み失敗時に既存プロフィールを空データで上書きしないことを確認する。
 
-## 12. v0.2.2 完了条件
+## 12. Google Drive認証設定
+
+FastAPIの `GoogleDriveStorage` はStreamlitの状態やsecretに依存せず、`GOOGLE_DRIVE_AUTH_MODE` で認証方式を明示的に選択する。
+
+- `user_oauth`: GoogleユーザーOAuth 2.0。通常ユーザーのMy Driveへ、そのユーザー本人として接続する。
+- `service_account`: `GOOGLE_SERVICE_ACCOUNT_JSON` のサービスアカウントを使用する。
+- `adc`: Application Default Credentialsを使用する。
+- `auto` または未指定: 従来互換として、サービスアカウントJSONがあれば使用し、なければADCを使用する。ユーザーOAuthへは暗黙に切り替えない。
+
+ユーザーOAuthでは `GOOGLE_OAUTH_CREDENTIALS_JSON` を優先し、未指定の場合は `GOOGLE_OAUTH_TOKEN_FILE` のファイルを読む。ファイルパスの既定値は `token.json` とする。期限切れまたは無効なアクセストークンはrefresh tokenで更新する。tokenの不存在、形式不正、refresh失敗は保存先の不存在ではなく `Unavailable` として扱う。未知の認証方式は設定エラーとし、別方式へfallbackしない。
+
+Drive内の保存先ルートは `GOOGLE_DRIVE_ROOT_FOLDER_ID` で指定する。秘密情報やtokenをソースコードへ保存しない。クラウド環境ではOAuth credential JSONをSecret Manager等から環境設定へ注入できる構造を使用する。
+
+### 12.1 開発用テストルートのbootstrap
+
+`drive.file` scopeのまま実Drive接続を確認するため、`scripts/create_drive_test_root.py` を開発者が明示的に1回実行する。このスクリプトはユーザーOAuthだけを許可し、My Drive直下にアプリ所有の `Fairies_Test` フォルダを作成してfolder IDを出力する。
+
+フォルダは名前だけで判定せず、My Drive直下、folder MIME、`data_type=fairies_test_root`、`app_id=fairies_v0_2_2` のappPropertiesで識別する。同じ識別情報のフォルダが1件あれば再利用し、複数件あれば競合として作成を中止する。取得したIDは後続の実Driveテストで `GOOGLE_DRIVE_ROOT_FOLDER_ID` に設定する。本番データの移行や既存Driveファイルの操作は行わない。
+
+## 13. v0.2.2 完了条件
 
 FlutterとFastAPIを使用して、以下の一連の流れを動作確認できることを完了条件とする。
 
