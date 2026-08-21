@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../config/api_config.dart';
 import '../models/chat_message.dart';
+import '../models/match_response.dart';
 import '../models/session.dart';
 
 class FairiesApiException implements Exception {
@@ -79,6 +80,36 @@ class FairiesApiClient {
         throw const FormatException('Invalid chat response.');
       }
       return ChatMessage.fromJson(message);
+    } on FormatException {
+      throw FairiesApiException(
+        code: 'INVALID_RESPONSE',
+        message: 'サーバーから正しい応答を受け取れませんでした。',
+        statusCode: response.statusCode,
+      );
+    }
+  }
+
+  Future<MatchResponse> generateMatch({
+    required String userId,
+    required String sessionId,
+    required List<ChatMessage> messages,
+  }) async {
+    final response = await _postJson(
+      '/match',
+      body: {
+        'user_id': userId,
+        'session_id': sessionId,
+        'messages': messages.map((message) => message.toJson()).toList(),
+      },
+    );
+    if (response.statusCode != 200) {
+      throw _apiError(
+        response,
+        fallbackMessage: 'マッチング結果を取得できませんでした。再試行してください。',
+      );
+    }
+    try {
+      return MatchResponse.fromJson(_decodeObject(response));
     } on FormatException {
       throw FairiesApiException(
         code: 'INVALID_RESPONSE',

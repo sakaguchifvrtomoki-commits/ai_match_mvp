@@ -124,4 +124,97 @@ void main() {
       ),
     );
   });
+
+  test('POST /match sends the full history and parses HTTP 200', () async {
+    late http.Request captured;
+    final client = FairiesApiClient(
+      baseUrl: 'http://example.test:8000',
+      client: MockClient((request) async {
+        captured = request;
+        return jsonResponse(_matchJson(), 200);
+      }),
+    );
+    const messages = [
+      ChatMessage(role: 'assistant', content: '挨拶'),
+      ChatMessage(role: 'user', content: '一件目'),
+      ChatMessage(role: 'user', content: '二件目'),
+      ChatMessage(role: 'user', content: '三件目'),
+    ];
+
+    final response = await client.generateMatch(
+      userId: 'user_123',
+      sessionId: 'session_456',
+      messages: messages,
+    );
+
+    expect(captured.url.toString(), 'http://example.test:8000/match');
+    expect(jsonDecode(captured.body), {
+      'user_id': 'user_123',
+      'session_id': 'session_456',
+      'messages': messages.map((message) => message.toJson()).toList(),
+    });
+    expect(response.analysis.summary, '分析概要');
+    expect(response.match.matchedCandidate.name, 'あおい');
+  });
+
+  test('POST /match parses FastAPI errors', () async {
+    final client = FairiesApiClient(
+      client: MockClient(
+        (_) async => jsonResponse({
+          'error': {'code': 'MATCHING_FAILED', 'message': 'マッチング失敗'},
+        }, 502),
+      ),
+    );
+
+    expect(
+      () => client.generateMatch(
+        userId: 'user_123',
+        sessionId: 'session_456',
+        messages: const [],
+      ),
+      throwsA(
+        isA<FairiesApiException>().having(
+          (error) => error.code,
+          'code',
+          'MATCHING_FAILED',
+        ),
+      ),
+    );
+  });
 }
+
+Map<String, dynamic> _matchJson() => {
+  'analysis': {
+    'personality': '穏やか',
+    'values': '誠実',
+    'hidden_needs': '安心',
+    'communication_style': '丁寧',
+    'ideal_partner_type': '対話型',
+    'summary': '分析概要',
+  },
+  'match': {
+    'matched_candidate': _candidateJson(),
+    'match_score': 85,
+    'match_label': '好相性',
+    'match_reason': '価値観',
+    'possible_concern': '速度差',
+    'recommended_first_message': 'こんにちは',
+  },
+  'top_candidates': [
+    {'candidate': _candidateJson(), 'similarity': 0.85},
+  ],
+  'after_match_support': null,
+  'profile_updated': true,
+};
+
+Map<String, dynamic> _candidateJson() => {
+  'id': 'c01',
+  'name': 'あおい',
+  'age': 29,
+  'personality': '明るい',
+  'values': '信頼',
+  'hobbies': '読書',
+  'communication_style': '率直',
+  'relationship_style': '協力的',
+  'description': '候補者',
+};

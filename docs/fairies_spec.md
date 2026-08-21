@@ -444,6 +444,12 @@ Flutterの次のAPI接続は `POST /chat` だけを対象とする。Flutterが�
 
 画面は初回挨拶を含む会話履歴、roleで区別した簡易message表示、入力欄、送信、loading、APIエラー、retryを提供する。本格的なチャットデザイン、`POST /match`、session終了APIとの接続は後工程とする。
 
+### 13.3 Flutterからのマッチング
+
+Flutterは空でないuser messageが3件以上ある場合だけ `POST /match` を実行し、保持中の `userId`、`sessionId`、`messages` 全体を送る。分析、マッチ結果、上位候補、マッチ後支援、プロフィール更新結果は型付きの `MatchResponse` として会話履歴とは別に保持する。成功または失敗によってmessagesを変更せず、matching中の二重実行も抑止する。
+
+画面は分析summary、候補者名・年齢、score・label・理由・懸念・推奨初回文、プロフィール更新結果を表示する。マッチ後支援がnullでも成功として扱い、`profile_updated=false` の場合もマッチ結果を破棄しない。APIエラーは会話へ混ぜず、再実行可能な状態で別表示する。session終了APIとの接続は後工程とする。
+
 ## 14. v0.2.2 完了条件
 
 FlutterとFastAPIを使用して、以下の一連の流れを動作確認できることを完了条件とする。

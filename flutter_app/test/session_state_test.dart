@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:fairies_app/services/fairies_api_client.dart';
+import 'package:fairies_app/models/chat_message.dart';
 import 'package:fairies_app/state/session_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -242,4 +243,121 @@ void main() {
     );
     await firstSend;
   });
+
+  test('match requires three user messages', () async {
+    var requests = 0;
+    final state = _matchReadyState(
+      MockClient((_) async {
+        requests += 1;
+        return jsonResponse(_matchJson(), 200);
+      }),
+      userMessageCount: 2,
+    );
+
+    await state.generateMatch();
+
+    expect(requests, 0);
+    expect(state.matchResponse, isNull);
+  });
+
+  test('match stores response without modifying messages', () async {
+    final state = _matchReadyState(
+      MockClient(
+        (_) async => jsonResponse(_matchJson(profileUpdated: false), 200),
+      ),
+    );
+    final original = List<ChatMessage>.of(state.messages);
+
+    await state.generateMatch();
+
+    expect(state.messages, orderedEquals(original));
+    expect(state.matchResponse?.match.matchedCandidate.name, 'あおい');
+    expect(state.matchResponse?.profileUpdated, isFalse);
+    expect(state.isMatching, isFalse);
+  });
+
+  test('matching prevents duplicate requests', () async {
+    final pending = Completer<http.Response>();
+    var requests = 0;
+    final state = _matchReadyState(
+      MockClient((_) {
+        requests += 1;
+        return pending.future;
+      }),
+    );
+
+    final first = state.generateMatch();
+    await state.generateMatch();
+    await Future<void>.delayed(Duration.zero);
+    expect(state.isMatching, isTrue);
+    expect(requests, 1);
+
+    pending.complete(jsonResponse(_matchJson(), 200));
+    await first;
+    expect(state.isMatching, isFalse);
+  });
+
+  test('match API error stays separate from messages', () async {
+    final state = _matchReadyState(
+      MockClient(
+        (_) async => jsonResponse({
+          'error': {'code': 'ANALYSIS_FAILED', 'message': '分析できませんでした。'},
+        }, 502),
+      ),
+    );
+    final original = List<ChatMessage>.of(state.messages);
+
+    await state.generateMatch();
+
+    expect(state.messages, orderedEquals(original));
+    expect(state.errorCode, 'ANALYSIS_FAILED');
+    expect(state.matchResponse, isNull);
+  });
 }
+
+SessionState _matchReadyState(MockClient client, {int userMessageCount = 3}) {
+  final state = SessionState(apiClient: FairiesApiClient(client: client));
+  state.userId = 'user_match';
+  state.sessionId = 'session_match';
+  state.messages.add(const ChatMessage(role: 'assistant', content: '挨拶'));
+  for (var index = 0; index < userMessageCount; index++) {
+    state.messages.add(ChatMessage(role: 'user', content: '発言$index'));
+  }
+  return state;
+}
+
+Map<String, dynamic> _matchJson({bool profileUpdated = true}) => {
+  'analysis': {
+    'personality': '穏やか',
+    'values': '誠実',
+    'hidden_needs': '安心',
+    'communication_style': '丁寧',
+    'ideal_partner_type': '対話型',
+    'summary': '分析概要',
+  },
+  'match': {
+    'matched_candidate': _candidateJson(),
+    'match_score': 85,
+    'match_label': '好相性',
+    'match_reason': '価値観',
+    'possible_concern': '速度差',
+    'recommended_first_message': 'こんにちは',
+  },
+  'top_candidates': [
+    {'candidate': _candidateJson(), 'similarity': 0.85},
+  ],
+  'after_match_support': null,
+  'profile_updated': profileUpdated,
+};
+
+Map<String, dynamic> _candidateJson() => {
+  'id': 'c01',
+  'name': 'あおい',
+  'age': 29,
+  'personality': '明るい',
+  'values': '信頼',
+  'hobbies': '読書',
+  'communication_style': '率直',
+  'relationship_style': '協力的',
+  'description': '候補者',
+};

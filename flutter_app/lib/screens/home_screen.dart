@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../models/chat_message.dart';
+import '../models/match_response.dart';
 import '../state/session_state.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -68,13 +69,25 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: ListView.builder(
                     key: const Key('conversation-list'),
                     padding: const EdgeInsets.all(16),
-                    itemCount: _sessionState.messages.length,
-                    itemBuilder: (context, index) =>
-                        _MessageBubble(message: _sessionState.messages[index]),
+                    itemCount:
+                        _sessionState.messages.length +
+                        (_sessionState.matchResponse == null ? 0 : 1),
+                    itemBuilder: (context, index) {
+                      if (index == _sessionState.messages.length) {
+                        return _MatchResultCard(
+                          response: _sessionState.matchResponse!,
+                        );
+                      }
+                      return _MessageBubble(
+                        message: _sessionState.messages[index],
+                      );
+                    },
                   ),
                 ),
                 if (_sessionState.isLoading)
                   const LinearProgressIndicator(key: Key('chat-loading')),
+                if (_sessionState.isMatching)
+                  const LinearProgressIndicator(key: Key('match-loading')),
                 if (_sessionState.errorMessage != null)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -100,6 +113,28 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                 Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'ユーザー発言 ${_sessionState.userMessageCount}/3件以上',
+                        ),
+                      ),
+                      FilledButton.icon(
+                        key: const Key('generate-match'),
+                        onPressed: _sessionState.canMatch
+                            ? _sessionState.generateMatch
+                            : null,
+                        icon: const Icon(Icons.favorite),
+                        label: Text(
+                          _sessionState.isMatching ? 'マッチング中' : 'マッチングする',
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Padding(
                   padding: const EdgeInsets.all(12),
                   child: Row(
                     children: [
@@ -109,6 +144,7 @@ class _HomeScreenState extends State<HomeScreen> {
                           controller: _messageController,
                           enabled:
                               !_sessionState.isLoading &&
+                              !_sessionState.isMatching &&
                               !_sessionState.canRetryLastChat,
                           minLines: 1,
                           maxLines: 4,
@@ -125,6 +161,7 @@ class _HomeScreenState extends State<HomeScreen> {
                         key: const Key('send-chat'),
                         onPressed:
                             _sessionState.isLoading ||
+                                _sessionState.isMatching ||
                                 _sessionState.canRetryLastChat
                             ? null
                             : _sendMessage,
@@ -137,6 +174,46 @@ class _HomeScreenState extends State<HomeScreen> {
               ],
             );
           },
+        ),
+      ),
+    );
+  }
+}
+
+class _MatchResultCard extends StatelessWidget {
+  const _MatchResultCard({required this.response});
+
+  final MatchResponse response;
+
+  @override
+  Widget build(BuildContext context) {
+    final result = response.match;
+    final candidate = result.matchedCandidate;
+    final support = response.afterMatchSupport;
+    return Card(
+      key: const Key('match-result'),
+      margin: const EdgeInsets.only(top: 12),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('分析: ${response.analysis.summary}'),
+            const SizedBox(height: 8),
+            Text('${candidate.name}（${candidate.age}歳）'),
+            Text('相性: ${result.matchScore}点・${result.matchLabel}'),
+            Text('理由: ${result.matchReason}'),
+            Text('気になる点: ${result.possibleConcern}'),
+            Text('最初のメッセージ: ${result.recommendedFirstMessage}'),
+            Text('プロフィール更新: ${response.profileUpdated ? '成功' : '失敗'}'),
+            if (support != null) ...[
+              const Divider(),
+              Text('今日の一言: ${support.firstMessageToday}'),
+              Text('3日後の質問: ${support.questionIn3days}'),
+              Text('避けたい表現: ${support.avoidPhrase}'),
+              Text('返信が遅い時: ${support.slowReplyAction}'),
+            ],
+          ],
         ),
       ),
     );

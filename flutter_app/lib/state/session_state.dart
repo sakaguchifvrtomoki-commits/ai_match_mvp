@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
+import '../models/match_response.dart';
 import '../services/fairies_api_client.dart';
 
 class SessionState extends ChangeNotifier {
@@ -13,18 +14,32 @@ class SessionState extends ChangeNotifier {
   String? sessionId;
   final List<ChatMessage> messages = [];
   bool isLoading = false;
+  bool isMatching = false;
+  MatchResponse? matchResponse;
   String? errorCode;
   String? errorMessage;
   bool _canRetryLastChat = false;
 
   bool get hasSession => userId != null && sessionId != null;
   bool get canRetryLastChat => _canRetryLastChat;
+  int get userMessageCount => messages
+      .where(
+        (message) =>
+            message.role == 'user' && message.content.trim().isNotEmpty,
+      )
+      .length;
+  bool get canMatch =>
+      hasSession &&
+      userMessageCount >= 3 &&
+      !isLoading &&
+      !isMatching &&
+      !_canRetryLastChat;
 
   Future<void> startSession({
     String? existingUserId,
     bool logConsent = true,
   }) async {
-    if (isLoading) {
+    if (isLoading || isMatching) {
       return;
     }
     isLoading = true;
@@ -43,6 +58,7 @@ class SessionState extends ChangeNotifier {
         ..clear()
         ..add(session.initialMessage);
       _canRetryLastChat = false;
+      matchResponse = null;
     } on FairiesApiException catch (error) {
       errorCode = error.code;
       errorMessage = error.message;
@@ -54,7 +70,11 @@ class SessionState extends ChangeNotifier {
 
   Future<void> sendMessage(String text) async {
     final content = text.trim();
-    if (content.isEmpty || !hasSession || isLoading || _canRetryLastChat) {
+    if (content.isEmpty ||
+        !hasSession ||
+        isLoading ||
+        isMatching ||
+        _canRetryLastChat) {
       return;
     }
     messages.add(ChatMessage(role: 'user', content: content));
@@ -63,10 +83,32 @@ class SessionState extends ChangeNotifier {
   }
 
   Future<void> retryLastChat() async {
-    if (!_canRetryLastChat || !hasSession || isLoading) {
+    if (!_canRetryLastChat || !hasSession || isLoading || isMatching) {
       return;
     }
     await _sendCurrentChat();
+  }
+
+  Future<void> generateMatch() async {
+    if (!canMatch) return;
+
+    isMatching = true;
+    errorCode = null;
+    errorMessage = null;
+    notifyListeners();
+    try {
+      matchResponse = await _apiClient.generateMatch(
+        userId: userId!,
+        sessionId: sessionId!,
+        messages: List.unmodifiable(messages),
+      );
+    } on FairiesApiException catch (error) {
+      errorCode = error.code;
+      errorMessage = error.message;
+    } finally {
+      isMatching = false;
+      notifyListeners();
+    }
   }
 
   Future<void> _sendCurrentChat() async {

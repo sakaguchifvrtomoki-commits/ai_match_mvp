@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:fairies_app/screens/home_screen.dart';
+import 'package:fairies_app/models/chat_message.dart';
 import 'package:fairies_app/services/fairies_api_client.dart';
 import 'package:fairies_app/state/session_state.dart';
 import 'package:flutter/material.dart';
@@ -110,4 +111,71 @@ void main() {
       );
     },
   );
+
+  testWidgets('displays primary match results without changing history', (
+    WidgetTester tester,
+  ) async {
+    final state = SessionState(
+      apiClient: FairiesApiClient(
+        client: MockClient((_) async => jsonResponse(_matchJson(), 200)),
+      ),
+    );
+    state.userId = 'user_widget_match';
+    state.sessionId = 'session_widget_match';
+    state.messages.addAll(const [
+      ChatMessage(role: 'assistant', content: '初回挨拶'),
+      ChatMessage(role: 'user', content: '一件目'),
+      ChatMessage(role: 'user', content: '二件目'),
+      ChatMessage(role: 'user', content: '三件目'),
+    ]);
+    final messageCount = state.messages.length;
+    await tester.pumpWidget(MaterialApp(home: HomeScreen(sessionState: state)));
+
+    await tester.tap(find.byKey(const Key('generate-match')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('match-result')), findsOneWidget);
+    expect(find.textContaining('分析概要'), findsOneWidget);
+    expect(find.textContaining('あおい'), findsOneWidget);
+    expect(find.textContaining('85点'), findsOneWidget);
+    expect(find.textContaining('プロフィール更新: 失敗'), findsOneWidget);
+    expect(state.messages, hasLength(messageCount));
+  });
 }
+
+Map<String, dynamic> _matchJson() => {
+  'analysis': {
+    'personality': '穏やか',
+    'values': '誠実',
+    'hidden_needs': '安心',
+    'communication_style': '丁寧',
+    'ideal_partner_type': '対話型',
+    'summary': '分析概要',
+  },
+  'match': {
+    'matched_candidate': {
+      'id': 'c01',
+      'name': 'あおい',
+      'age': 29,
+      'personality': '明るい',
+      'values': '信頼',
+      'hobbies': '読書',
+      'communication_style': '率直',
+      'relationship_style': '協力的',
+      'description': '候補者',
+    },
+    'match_score': 85,
+    'match_label': '好相性',
+    'match_reason': '価値観が近い',
+    'possible_concern': '速度差',
+    'recommended_first_message': 'こんにちは',
+  },
+  'top_candidates': [],
+  'after_match_support': {
+    'first_message_today': '挨拶',
+    'question_in_3days': '最近どう？',
+    'avoid_phrase': '決めつけ',
+    'slow_reply_action': '待つ',
+  },
+  'profile_updated': false,
+};
