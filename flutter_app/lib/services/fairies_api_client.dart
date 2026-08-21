@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../config/api_config.dart';
+import '../models/chat_message.dart';
 import '../models/session.dart';
 
 class FairiesApiException implements Exception {
@@ -39,10 +40,45 @@ class FairiesApiClient {
       body: {'user_id': userId, 'log_consent': logConsent},
     );
     if (response.statusCode != 201) {
-      throw _apiError(response);
+      throw _apiError(response, fallbackMessage: 'セッションを開始できませんでした。再試行してください。');
     }
     try {
       return Session.fromJson(_decodeObject(response));
+    } on FormatException {
+      throw FairiesApiException(
+        code: 'INVALID_RESPONSE',
+        message: 'サーバーから正しい応答を受け取れませんでした。',
+        statusCode: response.statusCode,
+      );
+    }
+  }
+
+  Future<ChatMessage> sendChat({
+    required String userId,
+    required String sessionId,
+    required List<ChatMessage> messages,
+  }) async {
+    final response = await _postJson(
+      '/chat',
+      body: {
+        'user_id': userId,
+        'session_id': sessionId,
+        'messages': messages.map((message) => message.toJson()).toList(),
+      },
+    );
+    if (response.statusCode != 200) {
+      throw _apiError(
+        response,
+        fallbackMessage: 'Fairyから応答を取得できませんでした。再試行してください。',
+      );
+    }
+    try {
+      final body = _decodeObject(response);
+      final message = body['message'];
+      if (message is! Map<String, dynamic>) {
+        throw const FormatException('Invalid chat response.');
+      }
+      return ChatMessage.fromJson(message);
     } on FormatException {
       throw FairiesApiException(
         code: 'INVALID_RESPONSE',
@@ -78,7 +114,10 @@ class FairiesApiClient {
     return decoded;
   }
 
-  FairiesApiException _apiError(http.Response response) {
+  FairiesApiException _apiError(
+    http.Response response, {
+    required String fallbackMessage,
+  }) {
     try {
       final body = _decodeObject(response);
       final error = body['error'];
@@ -96,7 +135,7 @@ class FairiesApiClient {
     }
     return FairiesApiException(
       code: 'HTTP_ERROR',
-      message: 'セッションを開始できませんでした。再試行してください。',
+      message: fallbackMessage,
       statusCode: response.statusCode,
     );
   }

@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:fairies_app/models/chat_message.dart';
 import 'package:fairies_app/services/fairies_api_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -56,6 +57,70 @@ void main() {
         isA<FairiesApiException>()
             .having((error) => error.code, 'code', 'INVALID_REQUEST')
             .having((error) => error.message, 'message', 'ログ保存への同意が必要です。'),
+      ),
+    );
+  });
+
+  test(
+    'POST /chat sends the full message history and parses HTTP 200',
+    () async {
+      late http.Request captured;
+      final client = FairiesApiClient(
+        baseUrl: 'http://example.test:8000',
+        client: MockClient((request) async {
+          captured = request;
+          return jsonResponse({
+            'message': {'role': 'assistant', 'content': 'Fairyの返答'},
+          }, 200);
+        }),
+      );
+      const messages = [
+        ChatMessage(role: 'assistant', content: '初回挨拶'),
+        ChatMessage(role: 'user', content: 'こんにちは'),
+      ];
+
+      final reply = await client.sendChat(
+        userId: 'user_123',
+        sessionId: 'session_456',
+        messages: messages,
+      );
+
+      expect(captured.method, 'POST');
+      expect(captured.url.toString(), 'http://example.test:8000/chat');
+      expect(jsonDecode(captured.body), {
+        'user_id': 'user_123',
+        'session_id': 'session_456',
+        'messages': [
+          {'role': 'assistant', 'content': '初回挨拶'},
+          {'role': 'user', 'content': 'こんにちは'},
+        ],
+      });
+      expect(reply.role, 'assistant');
+      expect(reply.content, 'Fairyの返答');
+    },
+  );
+
+  test('POST /chat parses FastAPI AI errors', () async {
+    final client = FairiesApiClient(
+      client: MockClient(
+        (_) async => jsonResponse({
+          'error': {'code': 'AI_RESPONSE_TRUNCATED', 'message': '応答が途中で切れました。'},
+        }, 502),
+      ),
+    );
+
+    expect(
+      () => client.sendChat(
+        userId: 'user_123',
+        sessionId: 'session_456',
+        messages: const [ChatMessage(role: 'user', content: 'こんにちは')],
+      ),
+      throwsA(
+        isA<FairiesApiException>().having(
+          (error) => error.code,
+          'code',
+          'AI_RESPONSE_TRUNCATED',
+        ),
       ),
     );
   });

@@ -101,4 +101,145 @@ void main() {
       expect(state.messages.single.content, '成功しました');
     },
   );
+
+  test('sendMessage adds user then assistant in order', () async {
+    final state = SessionState(
+      apiClient: FairiesApiClient(
+        client: MockClient((request) async {
+          if (request.url.path == '/sessions') {
+            return jsonResponse({
+              'user_id': 'user_chat',
+              'session_id': 'session_chat',
+              'message': {'role': 'assistant', 'content': '初回挨拶'},
+            }, 201);
+          }
+          return jsonResponse({
+            'message': {'role': 'assistant', 'content': 'Fairyの返答'},
+          }, 200);
+        }),
+      ),
+    );
+    await state.startSession();
+
+    await state.sendMessage('  ユーザー発言  ');
+
+    expect(state.messages.map((message) => message.role), [
+      'assistant',
+      'user',
+      'assistant',
+    ]);
+    expect(state.messages[1].content, 'ユーザー発言');
+    expect(state.messages[2].content, 'Fairyの返答');
+  });
+
+  test('blank text and a missing session do not send', () async {
+    var requests = 0;
+    final state = SessionState(
+      apiClient: FairiesApiClient(
+        client: MockClient((_) async {
+          requests += 1;
+          return jsonResponse({}, 500);
+        }),
+      ),
+    );
+
+    await state.sendMessage('こんにちは');
+    await state.sendMessage('   ');
+
+    expect(requests, 0);
+    expect(state.messages, isEmpty);
+  });
+
+  test(
+    'failed chat keeps user message and retry adds only assistant',
+    () async {
+      var chatAttempts = 0;
+      final state = SessionState(
+        apiClient: FairiesApiClient(
+          client: MockClient((request) async {
+            if (request.url.path == '/sessions') {
+              return jsonResponse({
+                'user_id': 'user_retry_chat',
+                'session_id': 'session_retry_chat',
+                'message': {'role': 'assistant', 'content': '初回挨拶'},
+              }, 201);
+            }
+            chatAttempts += 1;
+            if (chatAttempts == 1) {
+              return jsonResponse({
+                'error': {
+                  'code': 'AI_RESPONSE_FAILED',
+                  'message': '再試行してください。',
+                },
+              }, 502);
+            }
+            return jsonResponse({
+              'message': {'role': 'assistant', 'content': '再試行後の返答'},
+            }, 200);
+          }),
+        ),
+      );
+      await state.startSession();
+
+      await state.sendMessage('残すユーザー発言');
+      expect(state.messages.map((message) => message.role), [
+        'assistant',
+        'user',
+      ]);
+      expect(state.messages.last.content, '残すユーザー発言');
+      expect(state.errorCode, 'AI_RESPONSE_FAILED');
+      expect(state.canRetryLastChat, isTrue);
+
+      await state.sendMessage('残すユーザー発言');
+      expect(state.messages, hasLength(2));
+
+      await state.retryLastChat();
+      expect(state.messages.map((message) => message.role), [
+        'assistant',
+        'user',
+        'assistant',
+      ]);
+      expect(state.messages.last.content, '再試行後の返答');
+      expect(state.canRetryLastChat, isFalse);
+      expect(state.errorMessage, isNull);
+    },
+  );
+
+  test('a second send is ignored while chat is loading', () async {
+    final chatResponse = Completer<http.Response>();
+    var chatRequests = 0;
+    final state = SessionState(
+      apiClient: FairiesApiClient(
+        client: MockClient((request) async {
+          if (request.url.path == '/sessions') {
+            return jsonResponse({
+              'user_id': 'user_loading_chat',
+              'session_id': 'session_loading_chat',
+              'message': {'role': 'assistant', 'content': '初回挨拶'},
+            }, 201);
+          }
+          chatRequests += 1;
+          return chatResponse.future;
+        }),
+      ),
+    );
+    await state.startSession();
+
+    final firstSend = state.sendMessage('最初の発言');
+    await state.sendMessage('二重送信');
+    await Future<void>.delayed(Duration.zero);
+    expect(state.isLoading, isTrue);
+    expect(chatRequests, 1);
+    expect(
+      state.messages.where((message) => message.role == 'user'),
+      hasLength(1),
+    );
+
+    chatResponse.complete(
+      jsonResponse({
+        'message': {'role': 'assistant', 'content': '返答'},
+      }, 200),
+    );
+    await firstSend;
+  });
 }

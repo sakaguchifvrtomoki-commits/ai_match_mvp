@@ -436,6 +436,14 @@ Flutterの最初のAPI接続は `POST /sessions` だけを対象とする。`lib
 
 AndroidエミュレータからローカルFastAPIへ接続する開発既定値は `http://10.0.2.2:8000` とする。クラウド接続時はコード変更を行わず、`--dart-define=FAIRIES_API_BASE_URL=<URL>` で切り替える。
 
+### 13.2 Flutterからのチャット送信
+
+Flutterの次のAPI接続は `POST /chat` だけを対象とする。Flutterが初回挨拶を含む `messages` 全体を保持し、送信時に `userId`、`sessionId` とともに送る。成功時はresponseのassistant messageだけを末尾へ追加する。
+
+空白だけの入力、session開始前、通信中は送信しない。新しいuser messageは通信開始前に1回だけ追加し、通信失敗時も削除しない。APIエラーは `errorCode` と `errorMessage` で別管理し、会話履歴へ混ぜない。失敗後のretryはuser messageを追加せず、既存のmessages全体を再送する。retry完了までは新規送信を抑止し、成功時だけassistant messageを追加する。
+
+画面は初回挨拶を含む会話履歴、roleで区別した簡易message表示、入力欄、送信、loading、APIエラー、retryを提供する。本格的なチャットデザイン、`POST /match`、session終了APIとの接続は後工程とする。
+
 ## 14. v0.2.2 完了条件
 
 FlutterとFastAPIを使用して、以下の一連の流れを動作確認できることを完了条件とする。
