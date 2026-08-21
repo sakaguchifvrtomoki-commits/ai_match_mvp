@@ -422,7 +422,21 @@ OAuth clientファイルは `GOOGLE_OAUTH_CLIENT_FILE`、保存先は `GOOGLE_OA
 
 自動cleanupは行わない。実行後は表示されたtest user IDとtest session IDだけを使用し、`profiles/current/<test user ID>.json`、`profiles/history/<test user ID>/`、`sessions/<test session ID>/` をDrive UIから手動削除する。共有フォルダや他ユーザーのデータには触れない。
 
-## 13. v0.2.2 完了条件
+## 13. Flutterプロジェクト
+
+Flutter clientはリポジトリ直下の `flutter_app/` に配置する。Dart package名は `fairies_app`、アプリ表示名は「フェアリーズ」とし、Androidを主要な開発ターゲットとする。
+
+初期構成では `lib/main.dart` がアプリ起動とテーマ、`lib/screens/` が画面を担当する。API接続工程では必要になった時点で `config/`、`models/`、`services/`、状態管理、共通widgetを小さく追加し、WidgetへHTTP処理を直接集中させない。
+
+### 13.1 Flutterからのセッション開始
+
+Flutterの最初のAPI接続は `POST /sessions` だけを対象とする。`lib/config/api_config.dart` が `FAIRIES_API_BASE_URL` のdart-defineを読み、`lib/services/fairies_api_client.dart` がHTTP 201と共通エラーJSONを処理する。API URLやHTTP処理をWidgetへ直接記述しない。
+
+`lib/models/` はAPIのsnake_case JSONとDartのcamelCaseプロパティを変換する。`lib/state/session_state.dart` は外部状態管理packageを使わず `ChangeNotifier` で `userId`、`sessionId`、Flutterが保持する `messages`、loading、API errorを管理する。成功時だけ初回assistant messageを会話履歴へ設定し、エラーは会話へ混ぜない。画面は開始、loading、初回挨拶、エラー、再試行を表示する。
+
+AndroidエミュレータからローカルFastAPIへ接続する開発既定値は `http://10.0.2.2:8000` とする。クラウド接続時はコード変更を行わず、`--dart-define=FAIRIES_API_BASE_URL=<URL>` で切り替える。
+
+## 14. v0.2.2 完了条件
 
 FlutterとFastAPIを使用して、以下の一連の流れを動作確認できることを完了条件とする。
 
