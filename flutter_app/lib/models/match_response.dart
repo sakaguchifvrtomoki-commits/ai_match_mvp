@@ -23,6 +23,15 @@ class AnalysisResult {
   final String communicationStyle;
   final String idealPartnerType;
   final String summary;
+
+  Map<String, dynamic> toJson() => {
+    'personality': personality,
+    'values': values,
+    'hidden_needs': hiddenNeeds,
+    'communication_style': communicationStyle,
+    'ideal_partner_type': idealPartnerType,
+    'summary': summary,
+  };
 }
 
 class MatchedCandidate {
@@ -60,6 +69,18 @@ class MatchedCandidate {
   final String communicationStyle;
   final String relationshipStyle;
   final String description;
+
+  Map<String, dynamic> toJson() => {
+    'id': id,
+    'name': name,
+    'age': age,
+    'personality': personality,
+    'values': values,
+    'hobbies': hobbies,
+    'communication_style': communicationStyle,
+    'relationship_style': relationshipStyle,
+    'description': description,
+  };
 }
 
 class MatchResult {
@@ -89,6 +110,15 @@ class MatchResult {
   final String matchReason;
   final String possibleConcern;
   final String recommendedFirstMessage;
+
+  Map<String, dynamic> toJson() => {
+    'matched_candidate': matchedCandidate.toJson(),
+    'match_score': matchScore,
+    'match_label': matchLabel,
+    'match_reason': matchReason,
+    'possible_concern': possibleConcern,
+    'recommended_first_message': recommendedFirstMessage,
+  };
 }
 
 class TopCandidate {
@@ -101,6 +131,11 @@ class TopCandidate {
 
   final MatchedCandidate candidate;
   final double similarity;
+
+  Map<String, dynamic> toJson() => {
+    'candidate': candidate.toJson(),
+    'similarity': similarity,
+  };
 }
 
 class AfterMatchSupport {
@@ -123,6 +158,13 @@ class AfterMatchSupport {
   final String questionIn3days;
   final String avoidPhrase;
   final String slowReplyAction;
+
+  Map<String, dynamic> toJson() => {
+    'first_message_today': firstMessageToday,
+    'question_in_3days': questionIn3days,
+    'avoid_phrase': avoidPhrase,
+    'slow_reply_action': slowReplyAction,
+  };
 }
 
 class MatchResponse {

@@ -15,6 +15,8 @@ class SessionState extends ChangeNotifier {
   final List<ChatMessage> messages = [];
   bool isLoading = false;
   bool isMatching = false;
+  bool isEnding = false;
+  bool isSessionCompleted = false;
   MatchResponse? matchResponse;
   String? errorCode;
   String? errorMessage;
@@ -33,13 +35,21 @@ class SessionState extends ChangeNotifier {
       userMessageCount >= 3 &&
       !isLoading &&
       !isMatching &&
+      !isEnding &&
+      !isSessionCompleted &&
       !_canRetryLastChat;
+  bool get canEndSession =>
+      hasSession &&
+      !isLoading &&
+      !isMatching &&
+      !isEnding &&
+      !isSessionCompleted;
 
   Future<void> startSession({
     String? existingUserId,
     bool logConsent = true,
   }) async {
-    if (isLoading || isMatching) {
+    if (isLoading || isMatching || isEnding) {
       return;
     }
     isLoading = true;
@@ -59,6 +69,7 @@ class SessionState extends ChangeNotifier {
         ..add(session.initialMessage);
       _canRetryLastChat = false;
       matchResponse = null;
+      isSessionCompleted = false;
     } on FairiesApiException catch (error) {
       errorCode = error.code;
       errorMessage = error.message;
@@ -74,6 +85,8 @@ class SessionState extends ChangeNotifier {
         !hasSession ||
         isLoading ||
         isMatching ||
+        isEnding ||
+        isSessionCompleted ||
         _canRetryLastChat) {
       return;
     }
@@ -83,7 +96,12 @@ class SessionState extends ChangeNotifier {
   }
 
   Future<void> retryLastChat() async {
-    if (!_canRetryLastChat || !hasSession || isLoading || isMatching) {
+    if (!_canRetryLastChat ||
+        !hasSession ||
+        isLoading ||
+        isMatching ||
+        isEnding ||
+        isSessionCompleted) {
       return;
     }
     await _sendCurrentChat();
@@ -107,6 +125,30 @@ class SessionState extends ChangeNotifier {
       errorMessage = error.message;
     } finally {
       isMatching = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> endSession() async {
+    if (!canEndSession) return;
+
+    isEnding = true;
+    errorCode = null;
+    errorMessage = null;
+    notifyListeners();
+    try {
+      final response = await _apiClient.endSession(
+        userId: userId!,
+        sessionId: sessionId!,
+        messages: List.unmodifiable(messages),
+        matchResponse: matchResponse,
+      );
+      isSessionCompleted = response.status == 'completed';
+    } on FairiesApiException catch (error) {
+      errorCode = error.code;
+      errorMessage = error.message;
+    } finally {
+      isEnding = false;
       notifyListeners();
     }
   }

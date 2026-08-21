@@ -3,6 +3,7 @@ import 'dart:convert';
 
 import 'package:fairies_app/services/fairies_api_client.dart';
 import 'package:fairies_app/models/chat_message.dart';
+import 'package:fairies_app/models/match_response.dart';
 import 'package:fairies_app/state/session_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -313,6 +314,79 @@ void main() {
     expect(state.errorCode, 'ANALYSIS_FAILED');
     expect(state.matchResponse, isNull);
   });
+
+  test('end marks session completed and preserves state', () async {
+    final state = _endReadyState(
+      MockClient((_) async => jsonResponse({'status': 'completed'}, 200)),
+    );
+    final originalMessages = List<ChatMessage>.of(state.messages);
+    final originalMatch = state.matchResponse;
+
+    await state.endSession();
+
+    expect(state.isSessionCompleted, isTrue);
+    expect(state.isEnding, isFalse);
+    expect(state.userId, 'user_end');
+    expect(state.sessionId, 'session_end');
+    expect(state.messages, orderedEquals(originalMessages));
+    expect(state.matchResponse, same(originalMatch));
+  });
+
+  test('failed end preserves state and can retry', () async {
+    var attempts = 0;
+    final state = _endReadyState(
+      MockClient((_) async {
+        attempts += 1;
+        if (attempts == 1) {
+          return jsonResponse({
+            'error': {'code': 'SESSION_END_FAILED', 'message': '終了処理に失敗しました。'},
+          }, 500);
+        }
+        return jsonResponse({'status': 'completed'}, 200);
+      }),
+    );
+    final originalMessages = List<ChatMessage>.of(state.messages);
+    final originalMatch = state.matchResponse;
+
+    await state.endSession();
+    expect(state.isSessionCompleted, isFalse);
+    expect(state.errorCode, 'SESSION_END_FAILED');
+    expect(state.messages, orderedEquals(originalMessages));
+    expect(state.matchResponse, same(originalMatch));
+
+    await state.endSession();
+    expect(state.isSessionCompleted, isTrue);
+    expect(attempts, 2);
+  });
+
+  test('ending prevents duplicate requests', () async {
+    final pending = Completer<http.Response>();
+    var requests = 0;
+    final state = _endReadyState(
+      MockClient((_) {
+        requests += 1;
+        return pending.future;
+      }),
+    );
+
+    final first = state.endSession();
+    await state.endSession();
+    await Future<void>.delayed(Duration.zero);
+    expect(state.isEnding, isTrue);
+    expect(requests, 1);
+
+    pending.complete(jsonResponse({'status': 'completed'}, 200));
+    await first;
+    expect(state.isSessionCompleted, isTrue);
+  });
+}
+
+SessionState _endReadyState(MockClient client) {
+  final state = _matchReadyState(client);
+  state.matchResponse = MatchResponse.fromJson(_matchJson());
+  state.userId = 'user_end';
+  state.sessionId = 'session_end';
+  return state;
 }
 
 SessionState _matchReadyState(MockClient client, {int userMessageCount = 3}) {

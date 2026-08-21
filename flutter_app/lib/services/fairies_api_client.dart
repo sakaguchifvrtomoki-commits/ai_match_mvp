@@ -6,6 +6,7 @@ import '../config/api_config.dart';
 import '../models/chat_message.dart';
 import '../models/match_response.dart';
 import '../models/session.dart';
+import '../models/session_end_response.dart';
 
 class FairiesApiException implements Exception {
   const FairiesApiException({
@@ -110,6 +111,41 @@ class FairiesApiClient {
     }
     try {
       return MatchResponse.fromJson(_decodeObject(response));
+    } on FormatException {
+      throw FairiesApiException(
+        code: 'INVALID_RESPONSE',
+        message: 'サーバーから正しい応答を受け取れませんでした。',
+        statusCode: response.statusCode,
+      );
+    }
+  }
+
+  Future<SessionEndResponse> endSession({
+    required String userId,
+    required String sessionId,
+    required List<ChatMessage> messages,
+    MatchResponse? matchResponse,
+  }) async {
+    final response = await _postJson(
+      '/sessions/${Uri.encodeComponent(sessionId)}/end',
+      body: {
+        'user_id': userId,
+        'messages': messages.map((message) => message.toJson()).toList(),
+        'analysis': matchResponse?.analysis.toJson(),
+        'match': matchResponse?.match.toJson(),
+        'top_candidates':
+            matchResponse?.topCandidates
+                .map((candidate) => candidate.toJson())
+                .toList() ??
+            [],
+        'after_match_support': matchResponse?.afterMatchSupport?.toJson(),
+      },
+    );
+    if (response.statusCode != 200) {
+      throw _apiError(response, fallbackMessage: 'セッションを終了できませんでした。再試行してください。');
+    }
+    try {
+      return SessionEndResponse.fromJson(_decodeObject(response));
     } on FormatException {
       throw FairiesApiException(
         code: 'INVALID_RESPONSE',

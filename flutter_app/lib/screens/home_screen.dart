@@ -88,6 +88,8 @@ class _HomeScreenState extends State<HomeScreen> {
                   const LinearProgressIndicator(key: Key('chat-loading')),
                 if (_sessionState.isMatching)
                   const LinearProgressIndicator(key: Key('match-loading')),
+                if (_sessionState.isEnding)
+                  const LinearProgressIndicator(key: Key('end-loading')),
                 if (_sessionState.errorMessage != null)
                   Padding(
                     padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
@@ -114,13 +116,13 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
-                  child: Row(
+                  child: Wrap(
+                    alignment: WrapAlignment.spaceBetween,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    runSpacing: 8,
                     children: [
-                      Expanded(
-                        child: Text(
-                          'ユーザー発言 ${_sessionState.userMessageCount}/3件以上',
-                        ),
-                      ),
+                      Text('ユーザー発言 ${_sessionState.userMessageCount}/3件以上'),
                       FilledButton.icon(
                         key: const Key('generate-match'),
                         onPressed: _sessionState.canMatch
@@ -131,9 +133,24 @@ class _HomeScreenState extends State<HomeScreen> {
                           _sessionState.isMatching ? 'マッチング中' : 'マッチングする',
                         ),
                       ),
+                      OutlinedButton.icon(
+                        key: const Key('end-session'),
+                        onPressed: _sessionState.canEndSession
+                            ? _sessionState.endSession
+                            : null,
+                        icon: const Icon(Icons.stop_circle_outlined),
+                        label: Text(
+                          _sessionState.isEnding ? '終了処理中' : 'セッションを終了',
+                        ),
+                      ),
                     ],
                   ),
                 ),
+                if (_sessionState.isSessionCompleted)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(12, 8, 12, 0),
+                    child: Text('セッションを終了しました', key: Key('session-completed')),
+                  ),
                 Padding(
                   padding: const EdgeInsets.all(12),
                   child: Row(
@@ -145,6 +162,8 @@ class _HomeScreenState extends State<HomeScreen> {
                           enabled:
                               !_sessionState.isLoading &&
                               !_sessionState.isMatching &&
+                              !_sessionState.isEnding &&
+                              !_sessionState.isSessionCompleted &&
                               !_sessionState.canRetryLastChat,
                           minLines: 1,
                           maxLines: 4,
@@ -162,6 +181,8 @@ class _HomeScreenState extends State<HomeScreen> {
                         onPressed:
                             _sessionState.isLoading ||
                                 _sessionState.isMatching ||
+                                _sessionState.isEnding ||
+                                _sessionState.isSessionCompleted ||
                                 _sessionState.canRetryLastChat
                             ? null
                             : _sendMessage,

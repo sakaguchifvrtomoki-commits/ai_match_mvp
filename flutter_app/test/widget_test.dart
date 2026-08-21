@@ -141,6 +141,34 @@ void main() {
     expect(find.textContaining('プロフィール更新: 失敗'), findsOneWidget);
     expect(state.messages, hasLength(messageCount));
   });
+
+  testWidgets('displays successful session completion and keeps history', (
+    WidgetTester tester,
+  ) async {
+    final state = SessionState(
+      apiClient: FairiesApiClient(
+        client: MockClient(
+          (_) async => jsonResponse({'status': 'completed'}, 200),
+        ),
+      ),
+    );
+    state.userId = 'user_widget_end';
+    state.sessionId = 'session_widget_end';
+    state.messages.addAll(const [
+      ChatMessage(role: 'assistant', content: '終了後も残る挨拶'),
+      ChatMessage(role: 'user', content: '終了後も残る発言'),
+    ]);
+    await tester.pumpWidget(MaterialApp(home: HomeScreen(sessionState: state)));
+
+    await tester.tap(find.byKey(const Key('end-session')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('session-completed')), findsOneWidget);
+    expect(find.text('セッションを終了しました'), findsOneWidget);
+    expect(find.text('終了後も残る挨拶'), findsOneWidget);
+    expect(find.text('終了後も残る発言'), findsOneWidget);
+    expect(state.isSessionCompleted, isTrue);
+  });
 }
 
 Map<String, dynamic> _matchJson() => {

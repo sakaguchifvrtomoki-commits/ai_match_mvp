@@ -450,6 +450,12 @@ Flutterは空でないuser messageが3件以上ある場合だけ `POST /match` 
 
 画面は分析summary、候補者名・年齢、score・label・理由・懸念・推奨初回文、プロフィール更新結果を表示する。マッチ後支援がnullでも成功として扱い、`profile_updated=false` の場合もマッチ結果を破棄しない。APIエラーは会話へ混ぜず、再実行可能な状態で別表示する。session終了APIとの接続は後工程とする。
 
+### 13.4 Flutterからのセッション終了
+
+Flutterは `POST /sessions/{session_id}/end` に保持中のuser IDとmessages全体を送る。マッチング済みの場合はanalysis、match、top candidates、after-match supportもAPI JSON形式で送り、未実行の場合はそれぞれnull、null、空配列、nullとする。終了APIは新しい分析、マッチング、プロフィール更新、会話生成を行わない。
+
+終了中の二重実行を防ぎ、成功時は終了済み状態を表示する。成功直後もuser ID、session ID、messages、match responseを保持する。失敗時も同じ状態を維持して再試行可能にし、APIエラーを会話履歴へ混ぜない。アンケート画面への遷移と新規セッション向けの状態リセットは後工程とする。
+
 ## 14. v0.2.2 完了条件
 
 FlutterとFastAPIを使用して、以下の一連の流れを動作確認できることを完了条件とする。

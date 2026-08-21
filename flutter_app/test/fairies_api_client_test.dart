@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:fairies_app/models/chat_message.dart';
+import 'package:fairies_app/models/match_response.dart';
 import 'package:fairies_app/services/fairies_api_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -180,6 +181,91 @@ void main() {
         ),
       ),
     );
+  });
+
+  test('POST /end sends pre-match null fields and parses completed', () async {
+    late http.Request captured;
+    final client = FairiesApiClient(
+      baseUrl: 'http://example.test:8000',
+      client: MockClient((request) async {
+        captured = request;
+        return jsonResponse({'status': 'completed'}, 200);
+      }),
+    );
+    const messages = [ChatMessage(role: 'assistant', content: '挨拶')];
+
+    final response = await client.endSession(
+      userId: 'user_end',
+      sessionId: 'session_end',
+      messages: messages,
+    );
+
+    expect(
+      captured.url.toString(),
+      'http://example.test:8000/sessions/session_end/end',
+    );
+    expect(jsonDecode(captured.body), {
+      'user_id': 'user_end',
+      'messages': [
+        {'role': 'assistant', 'content': '挨拶'},
+      ],
+      'analysis': null,
+      'match': null,
+      'top_candidates': [],
+      'after_match_support': null,
+    });
+    expect(response.status, 'completed');
+  });
+
+  test('POST /end sends all persisted match data', () async {
+    late Map<String, dynamic> body;
+    final client = FairiesApiClient(
+      client: MockClient((request) async {
+        body = jsonDecode(request.body) as Map<String, dynamic>;
+        return jsonResponse({'status': 'completed'}, 200);
+      }),
+    );
+    final matchResponse = MatchResponse.fromJson(_matchJson());
+
+    await client.endSession(
+      userId: 'user_end',
+      sessionId: 'session_end',
+      messages: const [ChatMessage(role: 'user', content: '発言')],
+      matchResponse: matchResponse,
+    );
+
+    expect(body['analysis'], matchResponse.analysis.toJson());
+    expect(body['match'], matchResponse.match.toJson());
+    expect(body['top_candidates'], [
+      matchResponse.topCandidates.single.toJson(),
+    ]);
+    expect(body['after_match_support'], isNull);
+  });
+
+  test('POST /end sends after-match support when present', () async {
+    late Map<String, dynamic> body;
+    final json = _matchJson();
+    json['after_match_support'] = {
+      'first_message_today': '今日の一言',
+      'question_in_3days': '3日後の質問',
+      'avoid_phrase': '避ける言葉',
+      'slow_reply_action': '待つ',
+    };
+    final client = FairiesApiClient(
+      client: MockClient((request) async {
+        body = jsonDecode(request.body) as Map<String, dynamic>;
+        return jsonResponse({'status': 'completed'}, 200);
+      }),
+    );
+
+    await client.endSession(
+      userId: 'user_end',
+      sessionId: 'session_end',
+      messages: const [],
+      matchResponse: MatchResponse.fromJson(json),
+    );
+
+    expect(body['after_match_support'], json['after_match_support']);
   });
 }
 
