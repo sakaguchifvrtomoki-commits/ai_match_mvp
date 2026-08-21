@@ -25,10 +25,20 @@ def _execute(request):
         raise Unavailable("Google Drive API is unavailable") from exc
 
 
-def get_or_create_test_root(service) -> str:
+def _escape(value: str) -> str:
+    return str(value).replace("\\", "\\\\").replace("'", "\\'")
+
+
+def get_or_create_test_root(service, parent_folder_id: str) -> str:
+    if not parent_folder_id:
+        raise StorageConfigurationError(
+            "GOOGLE_DRIVE_PARENT_FOLDER_ID is not configured"
+        )
+    escaped_parent = _escape(parent_folder_id)
     query = (
-        "'root' in parents and trashed = false "
+        f"'{escaped_parent}' in parents and trashed = false "
         f"and mimeType = '{FOLDER_MIME}' "
+        f"and name = '{FOLDER_NAME}' "
         "and appProperties has { key='data_type' and value='fairies_test_root' } "
         "and appProperties has { key='app_id' and value='fairies_v0_2_2' }"
     )
@@ -50,7 +60,7 @@ def get_or_create_test_root(service) -> str:
         service.files().create(
             body={
                 "name": FOLDER_NAME,
-                "parents": ["root"],
+                "parents": [parent_folder_id],
                 "mimeType": FOLDER_MIME,
                 "appProperties": APP_PROPERTIES,
             },
@@ -69,8 +79,13 @@ def main() -> int:
         raise StorageConfigurationError(
             "GOOGLE_DRIVE_AUTH_MODE must be user_oauth for this bootstrap script"
         )
+    parent_folder_id = os.getenv("GOOGLE_DRIVE_PARENT_FOLDER_ID", "").strip()
+    if not parent_folder_id:
+        raise StorageConfigurationError(
+            "GOOGLE_DRIVE_PARENT_FOLDER_ID is not configured"
+        )
     service = GoogleDriveStorage.build_service_from_env()
-    folder_id = get_or_create_test_root(service)
+    folder_id = get_or_create_test_root(service, parent_folder_id)
     print(f"GOOGLE_DRIVE_ROOT_FOLDER_ID={folder_id}")
     return 0
 

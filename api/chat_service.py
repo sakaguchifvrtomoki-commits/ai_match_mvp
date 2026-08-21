@@ -4,6 +4,8 @@ import re
 
 import app as streamlit_app
 from fairy_memory import build_fairy_memory_context
+from api.storage import get_storage
+from api.storage.base import NotFound
 
 
 BASE_SYSTEM_PROMPT = (
@@ -57,16 +59,11 @@ def validate_chat_identifiers(user_id: str, session_id: str) -> None:
 
 def load_user_profile(user_id: str) -> dict:
     """Load and migrate a profile using v0.2.1 logic without Streamlit state/logging."""
-    path = streamlit_app.get_user_profile_path(user_id)
-    if not path.exists():
-        return streamlit_app._empty_profile(user_id)
-
+    storage = get_storage()
     try:
-        raw_profile = json.loads(path.read_text(encoding="utf-8"))
-    except Exception as exc:
-        raise streamlit_app.ProfileLoadError(
-            f"プロフィールの読み込みに失敗しました: {exc}"
-        ) from exc
+        raw_profile = storage.load_profile(user_id)
+    except NotFound:
+        return streamlit_app._empty_profile(user_id)
     if not isinstance(raw_profile, dict):
         raise streamlit_app.ProfileLoadError("プロフィールが辞書型ではありません")
 
@@ -76,7 +73,7 @@ def load_user_profile(user_id: str) -> dict:
     )
     if needs_migration:
         # A backup is required before a migration can modify the source profile.
-        streamlit_app._copy_pre_migration_backup(path)
+        storage.backup_profile_before_migration(user_id)
 
     profile = streamlit_app.migrate_profile(raw_profile)
     profile["summary"] = streamlit_app.normalize_summary(profile.get("summary", ""))
@@ -85,7 +82,7 @@ def load_user_profile(user_id: str) -> dict:
     )
     streamlit_app.validate_profile(profile)
     if needs_migration:
-        streamlit_app.atomic_save_profile(path, profile)
+        storage.save_profile(user_id, profile)
     return profile
 
 

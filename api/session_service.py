@@ -1,11 +1,11 @@
 import datetime
-import json
 import re
 import uuid
 from dataclasses import dataclass
-from pathlib import Path
 
 import app as streamlit_app
+from api.storage import get_storage
+from api.storage.base import StorageError
 
 
 API_VERSION = "0.2.2"
@@ -104,12 +104,9 @@ def generate_initial_greeting(display_name: str | None = DEFAULT_DISPLAY_NAME) -
 
 def create_initial_session_log(
     *, user_id: str, session_id: str, started_at: datetime.datetime, log_consent: bool
-) -> Path:
-    base = Path(streamlit_app.__file__).parent / "logs" / API_VERSION / "sessions"
-    base.mkdir(parents=True, exist_ok=True)
+) -> None:
     timestamp = started_at.strftime("%Y%m%d_%H%M%S")
     short_id = session_id.rsplit("_", 1)[-1]
-    path = base / f"session_{timestamp}_v{API_VERSION}_{short_id}.md"
     started_text = started_at.isoformat(timespec="seconds")
     lines = [
         "# AI分身マッチングMVP ログ",
@@ -136,12 +133,6 @@ def create_initial_session_log(
         "",
         "まだマッチング結果はありません。",
     ]
-    try:
-        path.write_text("\n".join(lines), encoding="utf-8")
-    except Exception as exc:
-        raise SessionStartError("初期セッションログを作成できませんでした。") from exc
-
-    metadata_path = path.with_suffix(".json")
     metadata = {
         "app_version": API_VERSION,
         "user_id": user_id,
@@ -150,14 +141,12 @@ def create_initial_session_log(
         "log_consent": log_consent,
         "consented_at": started_text,
         "session_status": "started",
-        "log_path": str(path),
+        "started_at_compact": timestamp,
     }
     try:
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
-    except Exception as exc:
-        path.unlink(missing_ok=True)
+        get_storage().create_session(session_id, metadata, "\n".join(lines))
+    except StorageError as exc:
         raise SessionStartError("セッション情報を記録できませんでした。") from exc
-    return path
 
 
 def start_session(user_id: str | None, log_consent: bool) -> StartedSession:

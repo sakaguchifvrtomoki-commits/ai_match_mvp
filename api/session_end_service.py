@@ -1,35 +1,19 @@
 import datetime
-import json
-from pathlib import Path
-
 import app as streamlit_app
 from api.chat_service import validate_chat_identifiers
+from api.storage import get_storage
+from api.storage.base import StorageError
 
 
 class SessionEndFailed(RuntimeError):
     pass
 
 
-def _find_session_files(session_id: str) -> tuple[Path, Path]:
-    base = Path(streamlit_app.__file__).parent / "logs" / "0.2.2" / "sessions"
-    suffix = session_id.rsplit("_", 1)[-1]
-    metadata = list(base.glob(f"*{suffix}.json"))
-    if len(metadata) != 1:
-        raise SessionEndFailed("終了対象のセッション情報が見つかりません。")
-    try:
-        data = json.loads(metadata[0].read_text(encoding="utf-8"))
-        log_path = Path(data["log_path"])
-    except Exception as exc:
-        raise SessionEndFailed("セッション情報を読み込めませんでした。") from exc
-    return metadata[0], log_path
-
-
 def end_session(session_id: str, payload: dict) -> None:
     validate_chat_identifiers(payload["user_id"], session_id)
-    metadata_path, log_path = _find_session_files(session_id)
     try:
-        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except Exception as exc:
+        metadata = get_storage().load_session(session_id).metadata
+    except StorageError as exc:
         raise SessionEndFailed("セッション情報を読み込めませんでした。") from exc
     if metadata.get("session_id") != session_id or metadata.get("user_id") != payload["user_id"]:
         raise SessionEndFailed("セッション情報が一致しません。")
@@ -71,8 +55,8 @@ def end_session(session_id: str, payload: dict) -> None:
                   f"避けたほうがいい一言: {support['avoid_phrase']}",
                   f"返信が遅いときの対応: {support['slow_reply_action']}"]
     try:
-        log_path.write_text("\n".join(lines), encoding="utf-8")
-        metadata.update(session_status="completed", end_reason="user_clicked_finish", ended_at=ended_at)
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+        get_storage().update_session(session_id, {
+            "session_status": "completed", "end_reason": "user_clicked_finish", "ended_at": ended_at
+        }, "\n".join(lines))
     except Exception as exc:
         raise SessionEndFailed("最終セッションログを保存できませんでした。") from exc

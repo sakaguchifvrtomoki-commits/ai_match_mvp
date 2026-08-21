@@ -8,6 +8,7 @@ class NotFound(StorageError): pass
 class Unavailable(StorageError): pass
 class InvalidData(StorageError): pass
 class Conflict(StorageError): pass
+class StorageConfigurationError(StorageError): pass
 
 
 @dataclass(frozen=True)

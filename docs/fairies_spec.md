@@ -392,15 +392,35 @@ Drive内の保存先ルートは `GOOGLE_DRIVE_ROOT_FOLDER_ID` で指定する�
 
 ### 12.1 開発用テストルートのbootstrap
 
-`drive.file` scopeのまま実Drive接続を確認するため、`scripts/create_drive_test_root.py` を開発者が明示的に1回実行する。このスクリプトはユーザーOAuthだけを許可し、My Drive直下にアプリ所有の `Fairies_Test` フォルダを作成してfolder IDを出力する。
+`drive.file` scopeのまま実Drive接続を確認するため、`scripts/create_drive_test_root.py` を開発者が明示的に1回実行する。このスクリプトはユーザーOAuthだけを許可し、ユーザーが指定した `パーソナルAIマッチングMVP` フォルダ直下にアプリ所有の `Fairies_Test` フォルダを作成してfolder IDを出力する。
 
-フォルダは名前だけで判定せず、My Drive直下、folder MIME、`data_type=fairies_test_root`、`app_id=fairies_v0_2_2` のappPropertiesで識別する。同じ識別情報のフォルダが1件あれば再利用し、複数件あれば競合として作成を中止する。取得したIDは後続の実Driveテストで `GOOGLE_DRIVE_ROOT_FOLDER_ID` に設定する。本番データの移行や既存Driveファイルの操作は行わない。
+親フォルダは名前から推測せず、`GOOGLE_DRIVE_PARENT_FOLDER_ID` でfolder IDを必須指定する。未設定の場合は認証やDrive操作より前に設定エラーとする。`Fairies_Test` の検索と作成は必ずこのID直下へ限定し、My Drive直下には作成しない。
+
+テストルートは、指定親ID、`Fairies_Test` という名前、folder MIME、`data_type=fairies_test_root`、`app_id=fairies_v0_2_2` のappPropertiesで識別する。同じ識別情報のフォルダが1件あれば、手動で親フォルダ直下へ移動済みの場合も再利用する。複数件あれば競合として作成を中止し、名前だけが同じ別フォルダには触れない。取得したIDは後続の実Driveテストで `GOOGLE_DRIVE_ROOT_FOLDER_ID` に設定する。本番データの移行や既存Driveファイルの操作は行わない。
 
 ### 12.2 開発用OAuth再認証
 
 既存tokenが失効してrefreshできない場合は、開発者が `scripts/authorize_google_drive.py` を明示的に実行する。対話的認証はFastAPIおよび `GoogleDriveStorage` へ組み込まず、Desktop app用OAuth client JSONを使用して `InstalledAppFlow.run_local_server(port=0)` で行う。scopeは `https://www.googleapis.com/auth/drive.file` から拡張しない。
 
 OAuth clientファイルは `GOOGLE_OAUTH_CLIENT_FILE`、保存先は `GOOGLE_OAUTH_TOKEN_FILE` で指定する。既存tokenがある場合は通常実行を拒否し、`--force` を明示した場合だけ、タイムスタンプ付きバックアップを作成してからアトミックに置換する。保存前にrefresh tokenと `drive.file` scopeを検証する。token値は標準出力へ表示しない。この処理は認証tokenの取得だけを行い、Drive上のファイルやフォルダは作成しない。
+
+### 12.3 GoogleDriveStorage実疎通テスト
+
+`scripts/test_google_drive_storage_live.py` は、開発者が明示実行した場合だけ `GoogleDriveStorage.from_env()` で実Driveへ接続する。`FAIRIES_STORAGE_BACKEND=google_drive`、`GOOGLE_DRIVE_AUTH_MODE=user_oauth`、`GOOGLE_DRIVE_ROOT_FOLDER_ID` の明示設定を必須とし、rootにはbootstrapで取得した `Fairies_Test` のfolder IDを指定する。通常pytestではStorageをモックし、実Driveへ接続しない。
+
+実行ごとにUUIDを含む `__fairies_drive_live_test_<uuid>__` と `__fairies_drive_live_session_<uuid>__` を生成し、プロフィールの不存在、作成、読込、更新、履歴、migration前バックアップ、およびセッションの作成、読込、更新を既存Storageインターフェースだけで確認する。秘密情報は表示せず、作成したtest user IDとtest session IDだけをcleanup・調査用に表示する。
+
+失敗時の調査データを保持するため、自動cleanupは行わない。cleanupする場合は、成功時に表示された専用IDだけを使い、`Fairies_Test/profiles/current` のprofile、`profiles/history/<test user ID>`、`profiles/migration_backups/<test user ID>`、`sessions/<test session ID>` をGoogle Drive UIから手動削除する。共有の親フォルダや他のIDは削除しない。
+
+### 12.4 FastAPI・Google Drive実統合テスト
+
+`scripts/test_fastapi_google_drive_live.py` は、開発者が明示実行した場合だけFastAPIの `TestClient` から4 endpointを呼び、各service、Storage abstraction、`GoogleDriveStorage`、実Driveまでの経路を確認する。Driveは実接続するが、初回挨拶、チャット応答、人物分析、候補、マッチ結果、マッチ後支援、プロフィール抽出AIは固定stubとし、OpenAI APIへ接続しない。プロフィールmerge、履歴保存、sessionログ更新は既存業務コードを通す。
+
+`FAIRIES_STORAGE_BACKEND=google_drive`、`GOOGLE_DRIVE_AUTH_MODE=user_oauth`、`GOOGLE_DRIVE_ROOT_FOLDER_ID=<Fairies_Testのfolder ID>` を必須とする。実行ごとにUUIDを含む `__fairies_api_drive_live_test_<uuid>__` を使用し、session IDは `POST /sessions` が新規生成した値だけを後続APIへ渡す。
+
+`POST /sessions` は既存API仕様のHTTP 201、他3 APIはHTTP 200を確認する。chat後に空プロフィールが保存されていないこと、match後にプロフィールが空でなくsessionが `matched` であること、end後にsessionが `completed`、`end_reason=user_clicked_finish` であること、およびend処理がプロフィールを再更新していないことをDriveから再読込して確認する。
+
+自動cleanupは行わない。実行後は表示されたtest user IDとtest session IDだけを使用し、`profiles/current/<test user ID>.json`、`profiles/history/<test user ID>/`、`sessions/<test session ID>/` をDrive UIから手動削除する。共有フォルダや他ユーザーのデータには触れない。
 
 ## 13. v0.2.2 完了条件
 

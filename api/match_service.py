@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import app as streamlit_app
 from api.chat_service import load_user_profile, validate_chat_identifiers
+from api.storage import get_storage
 
 
 class InsufficientMessages(ValueError):
@@ -152,12 +153,8 @@ def update_fairy_profile(user_id: str, messages: list[dict], session_id: str) ->
         return False
     if session_id in (existing.get("evidence") or []):
         return True
-    history = streamlit_app.get_user_profile_history_dir()
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
-        (history / f"{user_id}_{timestamp}_{session_id}_before.json").write_text(
-            json.dumps(existing, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        get_storage().save_profile_history(user_id, session_id, existing, "before")
     except Exception:
         # Match v0.2.1: a history-copy failure does not overwrite or abort the profile.
         pass
@@ -194,11 +191,10 @@ def update_fairy_profile(user_id: str, messages: list[dict], session_id: str) ->
                 updated_at=datetime.datetime.now().isoformat(timespec="seconds"))
     try:
         merged = streamlit_app.merge_user_profiles(existing, diff, session_id)
-        path = streamlit_app.get_user_profile_path(user_id)
-        streamlit_app.atomic_save_profile(path, merged)
-        (history / f"{user_id}_{timestamp}_{session_id}.json").write_text(
-            json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        streamlit_app.validate_profile(merged)
+        storage = get_storage()
+        storage.save_profile(user_id, merged)
+        storage.save_profile_history(user_id, session_id, merged, "after")
         return True
     except Exception:
         return False
@@ -206,10 +202,6 @@ def update_fairy_profile(user_id: str, messages: list[dict], session_id: str) ->
 
 def save_session_log(user_id: str, session_id: str, messages: list[dict], analysis: dict,
                      match: dict, top: list[dict], support: dict | None) -> bool:
-    base = streamlit_app.Path(streamlit_app.__file__).parent / "logs" / "0.2.2" / "sessions"
-    base.mkdir(parents=True, exist_ok=True)
-    paths = list(base.glob(f"*{session_id.rsplit('_', 1)[-1]}.md"))
-    path = paths[0] if paths else base / f"{session_id}.md"
     candidate = match["matched_candidate"]
     lines = ["# AI分身マッチングMVP ログ", "", "## セッション情報",
              "- app_version: v0.2.2", f"- session_id: {session_id}", f"- user_id: {user_id}",
@@ -222,7 +214,7 @@ def save_session_log(user_id: str, session_id: str, messages: list[dict], analys
     if support:
         lines += ["", "## マッチ後支援"] + [f"{k}: {v}" for k, v in support.items()]
     try:
-        path.write_text("\n".join(lines), encoding="utf-8")
+        get_storage().update_session(session_id, {"session_status": "matched"}, "\n".join(lines))
         return True
     except Exception:
         return False
