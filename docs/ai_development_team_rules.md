@@ -1,4 +1,4 @@
-# Fairies Phase 1 AI開発チーム運用ルール
+# Fairies AI開発チーム運用ルール
 
 ## 体制と担当
 
@@ -12,6 +12,16 @@ Phase 1では、4つのGit worktreeとbranchを使って並行作業する。各
 | `agent/integration` | commit統合、競合対応、全テスト、統合後レビュー |
 
 通常の開発ブランチは `feature/v0.2.2-fastapi` とし、上記の `agent/*` branchはPhase 1の正式な例外とする。
+
+## Phase 2の司令塔
+
+Phase 2では既存の4 Agent体制を維持し、その前段に `agent/orchestrator` を追加する。司令塔はproduction codeの実装やmergeをせず、人間のゴールを実行可能なTask Briefへ分解する。不要なAgentは `SKIP` とする。
+
+作業の流れは次のとおりとする。
+
+`人間 → 司令塔 → Backend／Flutter／Test・Review → Integration → 人間`
+
+司令塔の判断基準と出力形式は `docs/ai_team/orchestrator_guide.md` に従う。
 
 ## 作業ルール
 
