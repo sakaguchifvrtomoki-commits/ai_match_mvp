@@ -1,10 +1,16 @@
 import datetime
 import json
+import logging
+import os
 from dataclasses import dataclass
+from typing import Iterator, Literal
 
 import app as streamlit_app
 from api.chat_service import load_user_profile, validate_chat_identifiers
 from api.storage import get_storage
+
+
+logger = logging.getLogger("uvicorn.error")
 
 
 class InsufficientMessages(ValueError):
@@ -26,6 +32,15 @@ class MatchOutcome:
     top_candidates: list[dict]
     after_match_support: dict | None
     profile_updated: bool
+    fairy_profile_summary: dict | None
+
+
+@dataclass(frozen=True)
+class MatchProgress:
+    phase: Literal["analyzing", "matching", "memorizing"]
+
+
+MatchPipelineEvent = MatchProgress | MatchOutcome
 
 
 def analyze_user(messages: list[dict], user_id: str) -> dict:
@@ -190,7 +205,12 @@ def update_fairy_profile(user_id: str, messages: list[dict], session_id: str) ->
     diff.update(user_id=user_id, profile_version=streamlit_app.CURRENT_PROFILE_VERSION,
                 updated_at=datetime.datetime.now().isoformat(timespec="seconds"))
     try:
-        merged = streamlit_app.merge_user_profiles(existing, diff, session_id)
+        merged = streamlit_app.merge_user_profiles(
+            existing,
+            diff,
+            session_id,
+            summary_generator=streamlit_app.generate_stable_summary,
+        )
         streamlit_app.validate_profile(merged)
         storage = get_storage()
         storage.save_profile(user_id, merged)
@@ -220,17 +240,86 @@ def save_session_log(user_id: str, session_id: str, messages: list[dict], analys
         return False
 
 
-def run_match(user_id: str, session_id: str, messages: list[dict]) -> MatchOutcome:
+def load_fairy_profile_summary(user_id: str) -> dict | None:
+    """Read the latest profile and expose only the legacy human-facing summary."""
+    backend = os.getenv("FAIRIES_STORAGE_BACKEND", "local").strip().lower()
+    try:
+        profile = load_user_profile(user_id)
+        understanding = streamlit_app.get_profile_summary_display(profile)
+        raw_values = profile.get("values", [])
+        values = (
+            [value.strip() for value in raw_values if isinstance(value, str) and value.strip()][:5]
+            if isinstance(raw_values, list)
+            else []
+        )
+        preferences = profile.get("preferences", {})
+        relationship_style = (
+            preferences.get("relationship_style", "").strip()
+            if isinstance(preferences, dict)
+            and isinstance(preferences.get("relationship_style", ""), str)
+            else ""
+        )
+        good_match = streamlit_app.get_profile_matching_good_match(profile)
+        good_match = good_match.strip() if isinstance(good_match, str) else ""
+    except Exception as exc:
+        logger.warning(
+            "fairy_profile_summary_load_failed user_id=%s backend=%s "
+            "profile_loaded=false exception=%s message=%s",
+            user_id,
+            backend,
+            type(exc).__name__,
+            str(exc),
+        )
+        return None
+
+    if not any((understanding, values, relationship_style, good_match)):
+        return None
+    return {
+        "understanding": understanding,
+        "values": values,
+        "relationship_style": relationship_style,
+        "good_match": good_match,
+    }
+
+
+def validate_match_input(user_id: str, session_id: str, messages: list[dict]) -> None:
     validate_chat_identifiers(user_id, session_id)
     if sum(1 for m in messages if m["role"] == "user" and m["content"].strip()) < 3:
         raise InsufficientMessages
+
+
+def iter_match_pipeline(
+    user_id: str,
+    session_id: str,
+    messages: list[dict],
+    *,
+    input_validated: bool = False,
+) -> Iterator[MatchPipelineEvent]:
+    """Run the shared match pipeline while exposing real phase boundaries."""
+    if not input_validated:
+        validate_match_input(user_id, session_id, messages)
+
+    yield MatchProgress("analyzing")
     analysis = analyze_user(messages, user_id)
+
+    yield MatchProgress("matching")
     try:
         candidates = streamlit_app.load_candidates()
     except Exception as exc:
         raise MatchingFailed from exc
     match, top = generate_match(analysis, candidates)
     support = generate_after_match_support(analysis, match)
+
+    yield MatchProgress("memorizing")
     updated = update_fairy_profile(user_id, messages, session_id)
+    profile_summary = load_fairy_profile_summary(user_id)
     save_session_log(user_id, session_id, messages, analysis, match, top, support)
-    return MatchOutcome(analysis, match, top, support, updated)
+    yield MatchOutcome(analysis, match, top, support, updated, profile_summary)
+
+
+def run_match(user_id: str, session_id: str, messages: list[dict]) -> MatchOutcome:
+    """Return the final result for the backward-compatible JSON endpoint."""
+    for event in iter_match_pipeline(user_id, session_id, messages):
+        if isinstance(event, MatchOutcome):
+            return event
+    raise MatchingFailed

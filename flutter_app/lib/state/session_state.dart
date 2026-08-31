@@ -2,25 +2,40 @@ import 'package:flutter/foundation.dart';
 
 import '../models/chat_message.dart';
 import '../models/match_response.dart';
+import '../models/match_loading_phase.dart';
 import '../services/fairies_api_client.dart';
+import '../services/user_storage.dart';
+
+enum SessionErrorAction { sessionStart, chat, match, end }
 
 class SessionState extends ChangeNotifier {
-  SessionState({FairiesApiClient? apiClient})
-    : _apiClient = apiClient ?? FairiesApiClient();
+  SessionState({FairiesApiClient? apiClient, UserStorage? userStorage})
+    : _apiClient = apiClient ?? FairiesApiClient(),
+      _userStorage = userStorage ?? const SharedPreferencesUserStorage() {
+    _userStorageInitialization = _loadStoredUserId();
+  }
 
   final FairiesApiClient _apiClient;
+  final UserStorage _userStorage;
+  late final Future<void> _userStorageInitialization;
 
   String? userId;
   String? sessionId;
   final List<ChatMessage> messages = [];
   bool isLoading = false;
   bool isMatching = false;
+  MatchLoadingPhase? matchLoadingPhase;
   bool isEnding = false;
   bool isSessionCompleted = false;
   MatchResponse? matchResponse;
   String? errorCode;
   String? errorMessage;
+  SessionErrorAction? errorAction;
+  bool isUserStorageReady = false;
+  String? storageErrorCode;
+  String? storageErrorMessage;
   bool _canRetryLastChat = false;
+  int? _lastMatchedUserMessageCount;
 
   bool get hasSession => userId != null && sessionId != null;
   bool get canRetryLastChat => _canRetryLastChat;
@@ -37,7 +52,10 @@ class SessionState extends ChangeNotifier {
       !isMatching &&
       !isEnding &&
       !isSessionCompleted &&
-      !_canRetryLastChat;
+      !_canRetryLastChat &&
+      matchResponse == null &&
+      (_lastMatchedUserMessageCount == null ||
+          userMessageCount > _lastMatchedUserMessageCount!);
   bool get canEndSession =>
       hasSession &&
       !isLoading &&
@@ -49,12 +67,12 @@ class SessionState extends ChangeNotifier {
     String? existingUserId,
     bool logConsent = true,
   }) async {
-    if (isLoading || isMatching || isEnding) {
-      return;
-    }
+    await _userStorageInitialization;
+    if (isLoading || isMatching || isEnding) return;
     isLoading = true;
     errorCode = null;
     errorMessage = null;
+    errorAction = null;
     notifyListeners();
 
     try {
@@ -68,13 +86,36 @@ class SessionState extends ChangeNotifier {
         ..clear()
         ..add(session.initialMessage);
       _canRetryLastChat = false;
+      _lastMatchedUserMessageCount = null;
       matchResponse = null;
       isSessionCompleted = false;
+      try {
+        await _userStorage.saveUserId(session.userId);
+        storageErrorCode = null;
+        storageErrorMessage = null;
+      } catch (_) {
+        storageErrorCode = 'USER_ID_SAVE_FAILED';
+        storageErrorMessage = 'ユーザー情報を端末に保存できませんでした。現在のセッションは利用できます。';
+      }
     } on FairiesApiException catch (error) {
       errorCode = error.code;
       errorMessage = error.message;
+      errorAction = SessionErrorAction.sessionStart;
     } finally {
       isLoading = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _loadStoredUserId() async {
+    try {
+      final storedUserId = await _userStorage.loadUserId();
+      userId ??= storedUserId;
+    } catch (_) {
+      storageErrorCode = 'USER_ID_LOAD_FAILED';
+      storageErrorMessage = '保存済みのユーザー情報を読み込めませんでした。';
+    } finally {
+      isUserStorageReady = true;
       notifyListeners();
     }
   }
@@ -87,6 +128,7 @@ class SessionState extends ChangeNotifier {
         isMatching ||
         isEnding ||
         isSessionCompleted ||
+        matchResponse != null ||
         _canRetryLastChat) {
       return;
     }
@@ -111,20 +153,30 @@ class SessionState extends ChangeNotifier {
     if (!canMatch) return;
 
     isMatching = true;
+    matchLoadingPhase = MatchLoadingPhase.analyzing;
     errorCode = null;
     errorMessage = null;
+    errorAction = null;
     notifyListeners();
     try {
-      matchResponse = await _apiClient.generateMatch(
+      final response = await _apiClient.generateMatchStream(
         userId: userId!,
         sessionId: sessionId!,
         messages: List.unmodifiable(messages),
+        onProgress: (phase) {
+          matchLoadingPhase = phase;
+          notifyListeners();
+        },
       );
+      matchResponse = response;
+      _lastMatchedUserMessageCount = userMessageCount;
     } on FairiesApiException catch (error) {
       errorCode = error.code;
       errorMessage = error.message;
+      errorAction = SessionErrorAction.match;
     } finally {
       isMatching = false;
+      matchLoadingPhase = null;
       notifyListeners();
     }
   }
@@ -135,6 +187,7 @@ class SessionState extends ChangeNotifier {
     isEnding = true;
     errorCode = null;
     errorMessage = null;
+    errorAction = null;
     notifyListeners();
     try {
       final response = await _apiClient.endSession(
@@ -147,16 +200,47 @@ class SessionState extends ChangeNotifier {
     } on FairiesApiException catch (error) {
       errorCode = error.code;
       errorMessage = error.message;
+      errorAction = SessionErrorAction.end;
     } finally {
       isEnding = false;
       notifyListeners();
     }
   }
 
+  bool prepareForNewSession() {
+    if (isLoading || isMatching || isEnding) return false;
+
+    sessionId = null;
+    messages.clear();
+    matchResponse = null;
+    matchLoadingPhase = null;
+    isSessionCompleted = false;
+    errorCode = null;
+    errorMessage = null;
+    errorAction = null;
+    _canRetryLastChat = false;
+    _lastMatchedUserMessageCount = null;
+    notifyListeners();
+    return true;
+  }
+
+  bool resumeConversationAfterMatch() {
+    if (matchResponse == null || isLoading || isMatching || isEnding) {
+      return false;
+    }
+    matchResponse = null;
+    errorCode = null;
+    errorMessage = null;
+    errorAction = null;
+    notifyListeners();
+    return true;
+  }
+
   Future<void> _sendCurrentChat() async {
     isLoading = true;
     errorCode = null;
     errorMessage = null;
+    errorAction = null;
     notifyListeners();
 
     try {
@@ -170,6 +254,7 @@ class SessionState extends ChangeNotifier {
     } on FairiesApiException catch (error) {
       errorCode = error.code;
       errorMessage = error.message;
+      errorAction = SessionErrorAction.chat;
     } finally {
       isLoading = false;
       notifyListeners();

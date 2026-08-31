@@ -81,4 +81,39 @@ void main() {
     expect(response.profileUpdated, isFalse);
     expect(response.match.matchedCandidate.id, 'c01');
   });
+
+  test('normalizes nullable analysis text without displaying null values', () {
+    final json = matchJson();
+    final analysis = Map<String, dynamic>.from(
+      json['analysis'] as Map<String, dynamic>,
+    );
+    json['analysis'] = analysis;
+    analysis['personality'] = null;
+    analysis['values'] = '';
+
+    final response = MatchResponse.fromJson(json);
+
+    expect(response.analysis.personality, isEmpty);
+    expect(response.analysis.values, isEmpty);
+    expect(response.analysis.hiddenNeeds, '安心感');
+  });
+
+  test('parses optional fairy profile summary and accepts a missing field', () {
+    final withSummary = matchJson();
+    withSummary['fairy_profile_summary'] = {
+      'understanding': '長期的な理解',
+      'values': ['信頼', '対話'],
+      'relationship_style': 'じっくり',
+      'good_match': '誠実な相手',
+    };
+
+    final parsed = MatchResponse.fromJson(withSummary);
+    final legacy = MatchResponse.fromJson(matchJson());
+
+    expect(parsed.fairyProfileSummary?.understanding, '長期的な理解');
+    expect(parsed.fairyProfileSummary?.values, ['信頼', '対話']);
+    expect(parsed.fairyProfileSummary?.relationshipStyle, 'じっくり');
+    expect(parsed.fairyProfileSummary?.goodMatch, '誠実な相手');
+    expect(legacy.fairyProfileSummary, isNull);
+  });
 }

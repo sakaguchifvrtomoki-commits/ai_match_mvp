@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:fairies_app/models/chat_message.dart';
 import 'package:fairies_app/models/match_response.dart';
+import 'package:fairies_app/models/match_loading_phase.dart';
 import 'package:fairies_app/services/fairies_api_client.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -183,6 +185,101 @@ void main() {
     );
   });
 
+  test('POST /match/stream parses split chunks and multiple lines', () async {
+    final payload = [
+      jsonEncode({'type': 'progress', 'phase': 'analyzing'}),
+      jsonEncode({'type': 'progress', 'phase': 'matching'}),
+      jsonEncode({'type': 'progress', 'phase': 'unknown_future_phase'}),
+      jsonEncode({'type': 'progress', 'phase': 'memorizing'}),
+      jsonEncode({'type': 'result', 'data': _matchJson()}),
+      '',
+    ].join('\n');
+    final splitAt = payload.indexOf('matching') + 3;
+    final transport = ChunkedClient([
+      utf8.encode(payload.substring(0, splitAt)),
+      utf8.encode(payload.substring(splitAt)),
+    ]);
+    final client = FairiesApiClient(
+      baseUrl: 'http://example.test:8000',
+      client: transport,
+    );
+    final phases = <MatchLoadingPhase>[];
+
+    final result = await client.generateMatchStream(
+      userId: 'user_123',
+      sessionId: 'session_456',
+      messages: const [ChatMessage(role: 'user', content: '発言')],
+      onProgress: phases.add,
+    );
+
+    expect(transport.request?.url.path, '/match/stream');
+    expect(jsonDecode(transport.request!.body), {
+      'user_id': 'user_123',
+      'session_id': 'session_456',
+      'messages': [
+        {'role': 'user', 'content': '発言'},
+      ],
+    });
+    expect(phases, [
+      MatchLoadingPhase.analyzing,
+      MatchLoadingPhase.matching,
+      MatchLoadingPhase.memorizing,
+    ]);
+    expect(result.analysis.summary, '分析概要');
+  });
+
+  test('POST /match/stream surfaces a terminal error event', () async {
+    final client = FairiesApiClient(
+      client: ChunkedClient([
+        utf8.encode(
+          '${jsonEncode({'type': 'progress', 'phase': 'analyzing'})}\n'
+          '${jsonEncode({
+            'type': 'error',
+            'error': {'code': 'ANALYSIS_FAILED', 'message': '分析できませんでした。'},
+          })}\n',
+        ),
+      ]),
+    );
+
+    expect(
+      () => client.generateMatchStream(
+        userId: 'user_123',
+        sessionId: 'session_456',
+        messages: const [],
+        onProgress: (_) {},
+      ),
+      throwsA(
+        isA<FairiesApiException>().having(
+          (error) => error.code,
+          'code',
+          'ANALYSIS_FAILED',
+        ),
+      ),
+    );
+  });
+
+  test('malformed match stream does not become a successful result', () async {
+    final client = FairiesApiClient(
+      client: ChunkedClient([utf8.encode('{not-json}\n')]),
+    );
+
+    expect(
+      () => client.generateMatchStream(
+        userId: 'user_123',
+        sessionId: 'session_456',
+        messages: const [],
+        onProgress: (_) {},
+      ),
+      throwsA(
+        isA<FairiesApiException>().having(
+          (error) => error.code,
+          'code',
+          'INVALID_RESPONSE',
+        ),
+      ),
+    );
+  });
+
   test('POST /end sends pre-match null fields and parses completed', () async {
     late http.Request captured;
     final client = FairiesApiClient(
@@ -267,6 +364,24 @@ void main() {
 
     expect(body['after_match_support'], json['after_match_support']);
   });
+}
+
+class ChunkedClient extends http.BaseClient {
+  ChunkedClient(this.chunks, {this.statusCode = 200});
+
+  final List<List<int>> chunks;
+  final int statusCode;
+  http.Request? request;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    this.request = request as http.Request;
+    return http.StreamedResponse(
+      Stream<List<int>>.fromIterable(chunks),
+      statusCode,
+      headers: {'content-type': 'application/x-ndjson'},
+    );
+  }
 }
 
 Map<String, dynamic> _matchJson() => {

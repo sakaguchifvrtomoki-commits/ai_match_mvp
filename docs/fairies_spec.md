@@ -320,6 +320,37 @@ FastAPIは受け取った `messages` をレスポンスへ含めず、保存・�
 
 `top_candidates` は既存v0.2.1が保持する上位3件の `{candidate, similarity}` を返す。マッチ後支援に失敗した場合は `after_match_support=null`、プロフィール更新に失敗した場合は `profile_updated=false` とする。
 
+### 8.6 `POST /match/stream`
+
+Flutterのマッチング中表示を実処理と同期させるため、通常JSONを返す既存の `POST /match` を維持したまま、`POST /match/stream` を追加する。Request bodyは `POST /match` と同一とし、ResponseのContent-Typeは `application/x-ndjson` とする。
+
+Responseは1 eventをJSON 1行とし、各行の末尾に改行を付ける。イベント本文の改行は通常のJSON escapeを使用する。
+
+```json
+{"type":"progress","phase":"analyzing"}
+{"type":"progress","phase":"matching"}
+{"type":"progress","phase":"memorizing"}
+{"type":"result","data":{"analysis":{},"match":{},"top_candidates":[],"after_match_support":null,"profile_updated":true}}
+```
+
+phaseは次の実処理境界で送信する。
+
+- `analyzing`: 入力・発言数検証後、`analyze_user()` の直前
+- `matching`: 人物分析完了後、候補者読込・マッチング・マッチ後支援生成の直前
+- `memorizing`: マッチ後支援完了後、プロフィール更新・表示用プロフィール概要生成・セッションログ更新の直前
+
+`result.data` は既存の `MatchResponse` と同じJSON構造とする。マッチ後支援だけの失敗やプロフィール更新だけの失敗は既存の部分成功仕様を維持し、`after_match_support=null` または `profile_updated=false` を含む `result` を返す。
+
+stream開始前に判定できるrequest・ID・発言数エラーは通常のHTTPエラーで返す。最初のprogress送信後に人物分析またはマッチングが失敗した場合は、次のterminal eventを送りstreamを終了する。内部例外やstack traceは返さない。
+
+```json
+{"type":"error","error":{"code":"ANALYSIS_FAILED","message":"人物分析に失敗しました。再試行してください。"}}
+```
+
+Flutterはマッチング時だけstream endpointを利用し、受信したphaseに従ってloading文言を切り替える。時間による疑似progressは使用しない。stream失敗時に既存 `POST /match` へ自動fallbackせず、既存error/retry UIからユーザーが明示的に再試行した場合だけstreamを最初から実行する。
+
+今回の実装ではjob ID、resume、WebSocket、client切断時のexactly-once保証を導入しない。既存プロフィール更新のsession単位の冪等性は維持するが、切断後の再試行でAI処理が重複する可能性は残る。クラウドdeploy時にはreverse proxy等がNDJSONをbufferせずprogressを逐次転送することを確認する。
+
 ## 9. `POST /sessions/{session_id}/end`
 
 ### 9.1 目的
@@ -455,6 +486,27 @@ Flutterは空でないuser messageが3件以上ある場合だけ `POST /match` 
 Flutterは `POST /sessions/{session_id}/end` に保持中のuser IDとmessages全体を送る。マッチング済みの場合はanalysis、match、top candidates、after-match supportもAPI JSON形式で送り、未実行の場合はそれぞれnull、null、空配列、nullとする。終了APIは新しい分析、マッチング、プロフィール更新、会話生成を行わない。
 
 終了中の二重実行を防ぎ、成功時は終了済み状態を表示する。成功直後もuser ID、session ID、messages、match responseを保持する。失敗時も同じ状態を維持して再試行可能にし、APIエラーを会話履歴へ混ぜない。アンケート画面への遷移と新規セッション向けの状態リセットは後工程とする。
+
+### 13.5 user IDの端末保存
+
+Flutterは `shared_preferences` の `fairies_user_id` keyへuser IDだけを保存する。起動時に保存済みIDを読み終えてからセッション開始を許可し、存在する場合は次の `POST /sessions` の `user_id` として送る。API成功後にresponseのuser IDをメモリと端末の両方へ保存する。
+
+user IDの端末保存だけが失敗した場合も、開始済みのsession ID、初回挨拶、現在のセッションを破棄しない。保存エラーは会話とは別の状態で表示する。session ID、messages、match responseは端末へ永続保存せず、新しいセッション成功時に新しいresponseと初回挨拶へ置き換える。
+
+### 13.6 Flutterの共通背景とアプリアイコン
+
+Flutter packageではrepository rootの原本を移動・変更せず、次のコピーをasset sourceとして使用する。
+
+- 共通背景: `flutter_app/assets/fairies_ai_BG.png`（原本: `assets/fairies_ai_BG.png`）
+- launcher icon: `flutter_app/assets/fairies_ai_icon.png`（原本: `assets/fairies_ai_icon.png`）
+
+同意・説明、セッション開始待機、チャット、マッチング中、マッチ結果、エラー、アンケート、新規セッション導線は、単一のHomeScreen背景として `fairies_ai_BG.png` を共有する。launcher iconは `fairies_ai_icon.png` をsourceとしてAndroidの解像度別mipmapとiOS AppIconを生成する。別の背景・アイコン画像は使用しない。
+
+### 13.7 チャット吹き出しと結果表示
+
+Flutterのチャット履歴は、Fairy発言を左、user発言を右へ配置する。吹き出しは画面の利用可能幅に対する比率で最大幅を決め、長文を省略せず折り返す。チャット入力、loading、ボタンは共通背景上で読める明るい面または紫系のコントラストを持たせるが、IME、送信、retry、状態遷移は変更しない。
+
+マッチ結果は、分析、マッチング、注意点、おすすめメッセージ、他候補、マッチ後支援、Fairyプロフィール、プロフィール更新状態の見出しと情報構造を維持したまま、淡い異なる背景色とborderを持つsectionとして表示する。色だけに依存せず、見出し、padding、spacingを維持する。
 
 ## 14. v0.2.2 完了条件
 

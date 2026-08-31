@@ -9,12 +9,12 @@ class AnalysisResult {
   });
 
   factory AnalysisResult.fromJson(Map<String, dynamic> json) => AnalysisResult(
-    personality: _string(json, 'personality'),
-    values: _string(json, 'values'),
-    hiddenNeeds: _string(json, 'hidden_needs'),
-    communicationStyle: _string(json, 'communication_style'),
-    idealPartnerType: _string(json, 'ideal_partner_type'),
-    summary: _string(json, 'summary'),
+    personality: _nullableString(json, 'personality'),
+    values: _nullableString(json, 'values'),
+    hiddenNeeds: _nullableString(json, 'hidden_needs'),
+    communicationStyle: _nullableString(json, 'communication_style'),
+    idealPartnerType: _nullableString(json, 'ideal_partner_type'),
+    summary: _nullableString(json, 'summary'),
   );
 
   final String personality;
@@ -167,6 +167,39 @@ class AfterMatchSupport {
   };
 }
 
+class FairyProfileSummary {
+  const FairyProfileSummary({
+    required this.understanding,
+    required this.values,
+    required this.relationshipStyle,
+    required this.goodMatch,
+  });
+
+  factory FairyProfileSummary.fromJson(Map<String, dynamic> json) {
+    final rawValues = json['values'];
+    if (rawValues is! List || rawValues.any((value) => value is! String)) {
+      throw const FormatException('Invalid fairy profile summary values.');
+    }
+    return FairyProfileSummary(
+      understanding: _nullableString(json, 'understanding'),
+      values: rawValues.cast<String>().toList(growable: false),
+      relationshipStyle: _nullableString(json, 'relationship_style'),
+      goodMatch: _nullableString(json, 'good_match'),
+    );
+  }
+
+  final String understanding;
+  final List<String> values;
+  final String relationshipStyle;
+  final String goodMatch;
+
+  bool get hasContent =>
+      understanding.trim().isNotEmpty ||
+      values.any((value) => value.trim().isNotEmpty) ||
+      relationshipStyle.trim().isNotEmpty ||
+      goodMatch.trim().isNotEmpty;
+}
+
 class MatchResponse {
   const MatchResponse({
     required this.analysis,
@@ -174,14 +207,17 @@ class MatchResponse {
     required this.topCandidates,
     required this.afterMatchSupport,
     required this.profileUpdated,
+    required this.fairyProfileSummary,
   });
 
   factory MatchResponse.fromJson(Map<String, dynamic> json) {
     final topCandidates = json['top_candidates'];
     final support = json['after_match_support'];
+    final profileSummary = json['fairy_profile_summary'];
     final profileUpdated = json['profile_updated'];
     if (topCandidates is! List ||
         (support != null && support is! Map<String, dynamic>) ||
+        (profileSummary != null && profileSummary is! Map<String, dynamic>) ||
         profileUpdated is! bool) {
       throw const FormatException('Invalid match response.');
     }
@@ -200,6 +236,9 @@ class MatchResponse {
           ? null
           : AfterMatchSupport.fromJson(support),
       profileUpdated: profileUpdated,
+      fairyProfileSummary: profileSummary == null
+          ? null
+          : FairyProfileSummary.fromJson(profileSummary),
     );
   }
 
@@ -208,6 +247,7 @@ class MatchResponse {
   final List<TopCandidate> topCandidates;
   final AfterMatchSupport? afterMatchSupport;
   final bool profileUpdated;
+  final FairyProfileSummary? fairyProfileSummary;
 }
 
 Map<String, dynamic> _object(Map<String, dynamic> json, String key) {
@@ -220,6 +260,13 @@ Map<String, dynamic> _object(Map<String, dynamic> json, String key) {
 
 String _string(Map<String, dynamic> json, String key) {
   final value = json[key];
+  if (value is! String) throw FormatException('Invalid $key.');
+  return value;
+}
+
+String _nullableString(Map<String, dynamic> json, String key) {
+  final value = json[key];
+  if (value == null) return '';
   if (value is! String) throw FormatException('Invalid $key.');
   return value;
 }

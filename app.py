@@ -1668,16 +1668,30 @@ def _reinforce_candidate(existing_candidates: list, canonical_key: str, session_
     return "not_found"
 
 
-def _choose_summary_stable_text(existing_stable: str, candidates: list) -> str:
-    explicit = [c for c in candidates if isinstance(c, dict) and c.get("status") == "explicit_correction"]
-    if explicit:
-        descriptions = [c.get("description", "") for c in explicit if c.get("description")]
-        if descriptions:
-            return descriptions[0]
+def _get_summary_stable_material(candidates: list) -> list[dict]:
+    if not isinstance(candidates, list):
+        return []
+    material = []
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get("status") not in {"stable", "explicit_correction"}:
+            continue
+        description = _normalize_text(candidate.get("description", ""))
+        if description:
+            material.append({"status": candidate.get("status"), "description": description})
+    return material
 
-    stable_candidates = [c for c in candidates if isinstance(c, dict) and c.get("status") == "stable"]
-    if stable_candidates:
-        descriptions = [c.get("description", "") for c in stable_candidates if c.get("description")]
+
+def _summary_stable_material_signature(candidates: list) -> tuple:
+    return tuple(sorted((item["status"], item["description"]) for item in _get_summary_stable_material(candidates)))
+
+
+def _choose_summary_stable_text(existing_stable: str, candidates: list) -> str:
+    material = _get_summary_stable_material(candidates)
+    if material:
+        # Deterministic fallback only. Production updates prefer the AI-generated
+        # natural-language summary, but corrections must never monopolize it.
+        material.sort(key=lambda item: item["status"] != "explicit_correction")
+        descriptions = [item["description"] for item in material]
         if len(descriptions) == 1:
             return descriptions[0]
         if len(descriptions) == 2:
@@ -1687,6 +1701,46 @@ def _choose_summary_stable_text(existing_stable: str, candidates: list) -> str:
     if existing_stable:
         return existing_stable
     return ""
+
+
+def generate_stable_summary(material: list[dict]) -> str | None:
+    """Generate a cautious human-readable profile summary from confirmed facts only."""
+    confirmed = _get_summary_stable_material(material)
+    if not confirmed:
+        return None
+    client = get_openai_client()
+    if client is None:
+        return None
+    evidence = [{"status": item["status"], "description": item["description"]} for item in confirmed]
+    prompt = (
+        "以下の確定済み人物特徴だけを根拠に、この人がどのような人物かを自然な日本語で要約してください。\n"
+        "2〜4文、1段落を目安にし、似た特徴は統合して人物全体を俯瞰してください。\n"
+        "候補にない特徴を推測しないでください。recentなど一時的情報を加えず、根拠以上に強く断定しないでください。\n"
+        "『〜する傾向がある』『〜を大切にする』『〜に関心を持つ』などは使用できますが、曖昧表現を連発しないでください。\n"
+        "特徴の単純な列挙ではなく、読みやすい人物像の文章だけを返してください。見出しやJSONは不要です。\n\n"
+        f"確定済み人物特徴:\n{json.dumps(evidence, ensure_ascii=False, indent=2)}"
+    )
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "確定済みの根拠だけから、慎重で自然な日本語の人物像を作成してください。"},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+            max_completion_tokens=700,
+        )
+        choice = response.choices[0]
+        if getattr(choice, "finish_reason", None) == "length":
+            return None
+        summary = _normalize_text(getattr(choice.message, "content", ""))
+        return summary or None
+    except Exception as exc:
+        try:
+            write_debug_log("stable_summary_generation_failed", {"error": str(exc)})
+        except Exception:
+            pass
+        return None
 
 
 def _apply_summary_corrections(stable_candidates, corrections, session_id):
@@ -1739,7 +1793,7 @@ def _apply_summary_corrections(stable_candidates, corrections, session_id):
     return stable_candidates
 
 
-def _merge_summary_from_diff(existing_profile: dict, new_profile: dict, session_id: str) -> dict:
+def _merge_summary_from_diff(existing_profile: dict, new_profile: dict, session_id: str, summary_generator=None) -> dict:
     existing_summary = normalize_summary(existing_profile.get("summary", ""))
     diff_summary = new_profile.get("summary", {}) if isinstance(new_profile.get("summary", {}), dict) else {}
     all_corrections = new_profile.get("corrections", []) if isinstance(new_profile.get("corrections", []), list) else []
@@ -1755,6 +1809,10 @@ def _merge_summary_from_diff(existing_profile: dict, new_profile: dict, session_
 
     stable_candidates = [c for c in stable_candidates if isinstance(c, dict)]
     stable_candidates = [_normalize_candidate_entry(c) for c in stable_candidates]
+    before_signature = _summary_stable_material_signature(stable_candidates)
+    before_explicit = tuple(
+        sorted(item["description"] for item in _get_summary_stable_material(stable_candidates) if item["status"] == "explicit_correction")
+    )
 
     if corrections:
         stable_candidates = _apply_summary_corrections(stable_candidates, corrections, session_id)
@@ -1805,7 +1863,28 @@ def _merge_summary_from_diff(existing_profile: dict, new_profile: dict, session_
                 except Exception:
                     pass
 
-    stable = _choose_summary_stable_text(existing_summary.get("stable", ""), stable_candidates)
+    after_signature = _summary_stable_material_signature(stable_candidates)
+    stable_material_changed = before_signature != after_signature
+    stable = existing_summary.get("stable", "")
+    if stable_material_changed and after_signature:
+        generated = None
+        if summary_generator is not None:
+            try:
+                generated = _normalize_text(summary_generator(_get_summary_stable_material(stable_candidates)))
+            except Exception:
+                generated = ""
+        if generated:
+            stable = generated
+        else:
+            after_explicit = tuple(
+                sorted(item["description"] for item in _get_summary_stable_material(stable_candidates) if item["status"] == "explicit_correction")
+            )
+            # An explicit correction makes the old prose potentially false, so
+            # prefer the confirmed deterministic material in that case.
+            if after_explicit != before_explicit or not stable:
+                stable = _choose_summary_stable_text("", stable_candidates)
+    elif not stable:
+        stable = _choose_summary_stable_text("", stable_candidates)
     recent = _merge_profile_scalar(existing_summary.get("recent", ""), diff_summary.get("recent", ""))
     growth = _merge_profile_scalar(existing_summary.get("growth", ""), diff_summary.get("growth", ""))
     tensions = _merge_profile_list(existing_summary.get("tensions", []), diff_summary.get("new_tensions", []), limit=15)
@@ -2048,7 +2127,7 @@ def recover_reset_profile(old_profile: dict, reset_profile: dict, session_id: st
     return recovered
 
 
-def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> dict:
+def merge_user_profiles(existing: dict, new_profile: dict, session_id: str, summary_generator=None) -> dict:
     merged = deepcopy(existing)
 
     _existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
@@ -2355,7 +2434,7 @@ def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> d
             ),
         }
 
-        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id)
+        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id, summary_generator)
     else:
         merged["personality_traits"] = {
             "communication_style": _merge_trait_text(
@@ -2442,7 +2521,7 @@ def merge_user_profiles(existing: dict, new_profile: dict, session_id: str) -> d
             new_profile.get("uncertainties", []),
         )
 
-        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id)
+        merged["summary"] = _merge_summary_from_diff(existing, new_profile, session_id, summary_generator)
 
     existing_evidence = existing.get("evidence", []) if isinstance(existing.get("evidence", []), list) else []
     merged["evidence"] = _merge_evidence_list(existing_evidence, [session_id], limit=10)
@@ -2592,7 +2671,9 @@ def update_fairy_profile(user_id: str, chat_history: list, session_id: str) -> b
             )
             return False
 
-        merged_profile = merge_user_profiles(existing, new_profile, session_id)
+        merged_profile = merge_user_profiles(
+            existing, new_profile, session_id, summary_generator=generate_stable_summary,
+        )
         success = save_user_profile(user_id, merged_profile)
         if success:
             save_user_profile_history(user_id, merged_profile, session_id)

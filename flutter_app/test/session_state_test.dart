@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:fairies_app/services/fairies_api_client.dart';
+import 'package:fairies_app/services/user_storage.dart';
 import 'package:fairies_app/models/chat_message.dart';
 import 'package:fairies_app/models/match_response.dart';
+import 'package:fairies_app/models/match_loading_phase.dart';
 import 'package:fairies_app/state/session_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 http.Response jsonResponse(Map<String, dynamic> body, int statusCode) {
   return http.Response.bytes(
@@ -18,6 +21,8 @@ http.Response jsonResponse(Map<String, dynamic> body, int statusCode) {
 }
 
 void main() {
+  setUp(() => SharedPreferences.setMockInitialValues({}));
+
   test(
     'successful start stores IDs and exactly one assistant message',
     () async {
@@ -52,6 +57,7 @@ void main() {
     );
 
     final start = state.startSession();
+    await Future<void>.delayed(Duration.zero);
     expect(state.isLoading, isTrue);
 
     response.complete(
@@ -250,7 +256,7 @@ void main() {
     final state = _matchReadyState(
       MockClient((_) async {
         requests += 1;
-        return jsonResponse(_matchJson(), 200);
+        return matchStreamResponse(_matchJson());
       }),
       userMessageCount: 2,
     );
@@ -264,7 +270,7 @@ void main() {
   test('match stores response without modifying messages', () async {
     final state = _matchReadyState(
       MockClient(
-        (_) async => jsonResponse(_matchJson(profileUpdated: false), 200),
+        (_) async => matchStreamResponse(_matchJson(profileUpdated: false)),
       ),
     );
     final original = List<ChatMessage>.of(state.messages);
@@ -276,6 +282,53 @@ void main() {
     expect(state.matchResponse?.profileUpdated, isFalse);
     expect(state.isMatching, isFalse);
   });
+
+  test(
+    'result mode blocks chat and rematch until a new user message',
+    () async {
+      var matchRequests = 0;
+      var chatRequests = 0;
+      final state = _matchReadyState(
+        MockClient((request) async {
+          if (request.url.path == '/match/stream') {
+            matchRequests += 1;
+            return matchStreamResponse(_matchJson());
+          }
+          chatRequests += 1;
+          return jsonResponse({
+            'message': {'role': 'assistant', 'content': '続きの返答'},
+          }, 200);
+        }),
+      );
+      final originalUserId = state.userId;
+      final originalSessionId = state.sessionId;
+      final originalMessages = List<ChatMessage>.of(state.messages);
+
+      await state.generateMatch();
+      await state.sendMessage('結果表示中には送れない');
+      await state.generateMatch();
+
+      expect(matchRequests, 1);
+      expect(chatRequests, 0);
+      expect(state.messages, orderedEquals(originalMessages));
+
+      expect(state.resumeConversationAfterMatch(), isTrue);
+      expect(state.userId, originalUserId);
+      expect(state.sessionId, originalSessionId);
+      expect(state.messages, orderedEquals(originalMessages));
+      expect(state.matchResponse, isNull);
+      expect(state.canMatch, isFalse);
+
+      await state.sendMessage('新しい発言');
+
+      expect(chatRequests, 1);
+      expect(state.canMatch, isTrue);
+      await state.generateMatch();
+      expect(matchRequests, 2);
+      expect(state.matchResponse, isNotNull);
+      expect(state.canMatch, isFalse);
+    },
+  );
 
   test('matching prevents duplicate requests', () async {
     final pending = Completer<http.Response>();
@@ -293,7 +346,7 @@ void main() {
     expect(state.isMatching, isTrue);
     expect(requests, 1);
 
-    pending.complete(jsonResponse(_matchJson(), 200));
+    pending.complete(matchStreamResponse(_matchJson()));
     await first;
     expect(state.isMatching, isFalse);
   });
@@ -315,6 +368,64 @@ void main() {
     expect(state.matchResponse, isNull);
   });
 
+  test(
+    'terminal stream error clears loading and preserves retry state',
+    () async {
+      var attempts = 0;
+      final state = _matchReadyState(
+        MockClient((_) async {
+          attempts += 1;
+          if (attempts == 1) {
+            return ndjsonResponse([
+              {'type': 'progress', 'phase': 'analyzing'},
+              {
+                'type': 'error',
+                'error': {'code': 'ANALYSIS_FAILED', 'message': '分析できませんでした。'},
+              },
+            ]);
+          }
+          return matchStreamResponse(_matchJson());
+        }),
+      );
+      final original = List<ChatMessage>.of(state.messages);
+
+      await state.generateMatch();
+
+      expect(state.isMatching, isFalse);
+      expect(state.matchLoadingPhase, isNull);
+      expect(state.errorCode, 'ANALYSIS_FAILED');
+      expect(state.messages, orderedEquals(original));
+
+      final retry = state.generateMatch();
+      expect(state.isMatching, isTrue);
+      expect(state.matchLoadingPhase, MatchLoadingPhase.analyzing);
+      await retry;
+      expect(state.matchResponse, isNotNull);
+      expect(state.matchLoadingPhase, isNull);
+    },
+  );
+
+  test(
+    'malformed and transport failures never leave the match spinner active',
+    () async {
+      final malformed = _matchReadyState(
+        MockClient((_) async => http.Response('{bad-json}\n', 200)),
+      );
+      await malformed.generateMatch();
+      expect(malformed.errorCode, 'INVALID_RESPONSE');
+      expect(malformed.isMatching, isFalse);
+      expect(malformed.matchLoadingPhase, isNull);
+
+      final disconnected = _matchReadyState(
+        MockClient((_) async => throw Exception('connection closed')),
+      );
+      await disconnected.generateMatch();
+      expect(disconnected.errorCode, 'NETWORK_ERROR');
+      expect(disconnected.isMatching, isFalse);
+      expect(disconnected.matchLoadingPhase, isNull);
+    },
+  );
+
   test('end marks session completed and preserves state', () async {
     final state = _endReadyState(
       MockClient((_) async => jsonResponse({'status': 'completed'}, 200)),
@@ -330,6 +441,30 @@ void main() {
     expect(state.sessionId, 'session_end');
     expect(state.messages, orderedEquals(originalMessages));
     expect(state.matchResponse, same(originalMatch));
+  });
+
+  test('new session preparation clears temporary state but preserves user', () {
+    final state = _endReadyState(
+      MockClient((_) async => jsonResponse({'status': 'completed'}, 200)),
+    );
+    state.isSessionCompleted = true;
+    state.errorCode = 'OLD_ERROR';
+    state.errorMessage = '前回のエラー';
+
+    final prepared = state.prepareForNewSession();
+
+    expect(prepared, isTrue);
+    expect(state.userId, 'user_end');
+    expect(state.sessionId, isNull);
+    expect(state.messages, isEmpty);
+    expect(state.matchResponse, isNull);
+    expect(state.isSessionCompleted, isFalse);
+    expect(state.canRetryLastChat, isFalse);
+    expect(state.errorCode, isNull);
+    expect(state.errorMessage, isNull);
+    expect(state.isLoading, isFalse);
+    expect(state.isMatching, isFalse);
+    expect(state.isEnding, isFalse);
   });
 
   test('failed end preserves state and can retry', () async {
@@ -379,6 +514,159 @@ void main() {
     await first;
     expect(state.isSessionCompleted, isTrue);
   });
+
+  test('loads a stored user ID and sends it to the next session', () async {
+    late Map<String, dynamic> requestBody;
+    final storage = FakeUserStorage(value: 'user_persisted');
+    final state = SessionState(
+      userStorage: storage,
+      apiClient: FairiesApiClient(
+        client: MockClient((request) async {
+          requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return jsonResponse({
+            'user_id': 'user_persisted',
+            'session_id': 'session_new',
+            'message': {'role': 'assistant', 'content': '新しい挨拶'},
+          }, 201);
+        }),
+      ),
+    );
+
+    await state.startSession();
+
+    expect(state.isUserStorageReady, isTrue);
+    expect(requestBody['user_id'], 'user_persisted');
+    expect(state.sessionId, 'session_new');
+    expect(storage.savedValues, ['user_persisted']);
+  });
+
+  test('missing stored ID sends null and saves the response ID', () async {
+    late Map<String, dynamic> requestBody;
+    final storage = FakeUserStorage();
+    final state = SessionState(
+      userStorage: storage,
+      apiClient: FairiesApiClient(
+        client: MockClient((request) async {
+          requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return jsonResponse({
+            'user_id': 'user_created',
+            'session_id': 'session_created',
+            'message': {'role': 'assistant', 'content': '挨拶'},
+          }, 201);
+        }),
+      ),
+    );
+
+    await state.startSession();
+
+    expect(requestBody['user_id'], isNull);
+    expect(storage.savedValues, ['user_created']);
+  });
+
+  test('new session replaces session ID, messages and match only', () async {
+    var attempt = 0;
+    final storage = FakeUserStorage(value: 'user_same');
+    final state = SessionState(
+      userStorage: storage,
+      apiClient: FairiesApiClient(
+        client: MockClient((_) async {
+          attempt += 1;
+          return jsonResponse({
+            'user_id': 'user_same',
+            'session_id': 'session_$attempt',
+            'message': {'role': 'assistant', 'content': '挨拶$attempt'},
+          }, 201);
+        }),
+      ),
+    );
+    await state.startSession();
+    state.messages.add(const ChatMessage(role: 'user', content: '前回の発言'));
+    state.matchResponse = MatchResponse.fromJson(_matchJson());
+
+    await state.startSession();
+
+    expect(state.userId, 'user_same');
+    expect(state.sessionId, 'session_2');
+    expect(state.messages, hasLength(1));
+    expect(state.messages.single.content, '挨拶2');
+    expect(state.matchResponse, isNull);
+  });
+
+  test('save failure keeps the successful current session', () async {
+    final storage = FakeUserStorage(failSave: true);
+    final state = SessionState(
+      userStorage: storage,
+      apiClient: FairiesApiClient(
+        client: MockClient(
+          (_) async => jsonResponse({
+            'user_id': 'user_unsaved',
+            'session_id': 'session_valid',
+            'message': {'role': 'assistant', 'content': '利用可能な挨拶'},
+          }, 201),
+        ),
+      ),
+    );
+
+    await state.startSession();
+
+    expect(state.userId, 'user_unsaved');
+    expect(state.sessionId, 'session_valid');
+    expect(state.messages.single.content, '利用可能な挨拶');
+    expect(state.storageErrorCode, 'USER_ID_SAVE_FAILED');
+    expect(state.errorCode, isNull);
+  });
+
+  test(
+    'does not request a session before stored ID loading completes',
+    () async {
+      final load = Completer<String?>();
+      var requests = 0;
+      final state = SessionState(
+        userStorage: FakeUserStorage(loadCompleter: load),
+        apiClient: FairiesApiClient(
+          client: MockClient((_) async {
+            requests += 1;
+            return jsonResponse({
+              'user_id': 'user_delayed',
+              'session_id': 'session_delayed',
+              'message': {'role': 'assistant', 'content': '挨拶'},
+            }, 201);
+          }),
+        ),
+      );
+
+      final starting = state.startSession();
+      await Future<void>.delayed(Duration.zero);
+      expect(state.isUserStorageReady, isFalse);
+      expect(requests, 0);
+
+      load.complete('user_delayed');
+      await starting;
+      expect(requests, 1);
+    },
+  );
+}
+
+class FakeUserStorage implements UserStorage {
+  FakeUserStorage({this.value, this.failSave = false, this.loadCompleter});
+
+  String? value;
+  final bool failSave;
+  final Completer<String?>? loadCompleter;
+  final List<String> savedValues = [];
+
+  @override
+  Future<String?> loadUserId() => loadCompleter?.future ?? Future.value(value);
+
+  @override
+  Future<void> saveUserId(String userId) async {
+    if (failSave) throw const UserStorageException('save failed');
+    value = userId;
+    savedValues.add(userId);
+  }
+
+  @override
+  Future<void> clearUserId() async => value = null;
 }
 
 SessionState _endReadyState(MockClient client) {
@@ -435,3 +723,18 @@ Map<String, dynamic> _candidateJson() => {
   'relationship_style': '協力的',
   'description': '候補者',
 };
+
+http.Response matchStreamResponse(Map<String, dynamic> result) =>
+    ndjsonResponse([
+      {'type': 'progress', 'phase': 'analyzing'},
+      {'type': 'progress', 'phase': 'matching'},
+      {'type': 'progress', 'phase': 'memorizing'},
+      {'type': 'result', 'data': result},
+    ]);
+
+http.Response ndjsonResponse(List<Map<String, dynamic>> events) =>
+    http.Response.bytes(
+      utf8.encode([...events.map(jsonEncode), ''].join('\n')),
+      200,
+      headers: {'content-type': 'application/x-ndjson'},
+    );

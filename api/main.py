@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.chat_service import (
     AIContextTooLong,
@@ -15,12 +15,24 @@ from api.schemas import (
     MessageResponse,
     MatchRequest,
     MatchResponse,
+    MatchStreamErrorEvent,
+    MatchStreamProgressEvent,
+    MatchStreamResultEvent,
     SessionCreateRequest,
     SessionCreateResponse,
     SessionEndRequest,
     SessionEndResponse,
 )
-from api.match_service import AnalysisFailed, InsufficientMessages, MatchingFailed, run_match
+from api.match_service import (
+    AnalysisFailed,
+    InsufficientMessages,
+    MatchOutcome,
+    MatchProgress,
+    MatchingFailed,
+    iter_match_pipeline,
+    run_match,
+    validate_match_input,
+)
 from api.session_end_service import SessionEndFailed, end_session
 from api.session_service import InvalidSessionRequest, SessionStartError, start_session
 
@@ -113,6 +125,51 @@ def match(payload: MatchRequest):
     except Exception:
         return error_response(502, "MATCHING_FAILED", "マッチングに失敗しました。再試行してください。")
     return MatchResponse(**result.__dict__)
+
+
+def _stream_error(code: str, message: str) -> str:
+    return MatchStreamErrorEvent(
+        error={"code": code, "message": message}
+    ).model_dump_json() + "\n"
+
+
+@app.post("/match/stream")
+def match_stream(payload: MatchRequest):
+    messages = [message.model_dump() for message in payload.messages]
+    try:
+        # Validate before StreamingResponse starts so known request errors retain
+        # the same HTTP semantics as the backward-compatible JSON endpoint.
+        validate_match_input(payload.user_id, payload.session_id, messages)
+    except InvalidChatRequest as exc:
+        return error_response(400, "INVALID_REQUEST", str(exc))
+    except InsufficientMessages:
+        return error_response(400, "INSUFFICIENT_MESSAGES", "分析には3件以上のユーザー発言が必要です。")
+
+    def events():
+        try:
+            for event in iter_match_pipeline(
+                payload.user_id,
+                payload.session_id,
+                messages,
+                input_validated=True,
+            ):
+                if isinstance(event, MatchProgress):
+                    yield MatchStreamProgressEvent(phase=event.phase).model_dump_json() + "\n"
+                elif isinstance(event, MatchOutcome):
+                    response = MatchResponse(**event.__dict__)
+                    yield MatchStreamResultEvent(data=response).model_dump_json() + "\n"
+        except AnalysisFailed:
+            yield _stream_error("ANALYSIS_FAILED", "人物分析に失敗しました。再試行してください。")
+        except MatchingFailed:
+            yield _stream_error("MATCHING_FAILED", "マッチングに失敗しました。再試行してください。")
+        except Exception:
+            yield _stream_error("MATCHING_FAILED", "マッチングに失敗しました。再試行してください。")
+
+    return StreamingResponse(
+        events(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.post("/sessions/{session_id}/end", response_model=SessionEndResponse)

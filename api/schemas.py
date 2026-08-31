@@ -83,12 +83,20 @@ class AfterMatchSupportResponse(BaseModel):
     slow_reply_action: str
 
 
+class FairyProfileSummaryResponse(BaseModel):
+    understanding: str
+    values: list[str]
+    relationship_style: str
+    good_match: str
+
+
 class MatchResponse(BaseModel):
     analysis: AnalysisResponse
     match: MatchResultResponse
     top_candidates: list[TopCandidateResponse]
     after_match_support: AfterMatchSupportResponse | None
     profile_updated: bool
+    fairy_profile_summary: FairyProfileSummaryResponse | None = None
 
 
 class SessionEndRequest(BaseModel):
@@ -116,4 +124,19 @@ class ErrorDetail(BaseModel):
 
 
 class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
+class MatchStreamProgressEvent(BaseModel):
+    type: Literal["progress"] = "progress"
+    phase: Literal["analyzing", "matching", "memorizing"]
+
+
+class MatchStreamResultEvent(BaseModel):
+    type: Literal["result"] = "result"
+    data: MatchResponse
+
+
+class MatchStreamErrorEvent(BaseModel):
+    type: Literal["error"] = "error"
     error: ErrorDetail
