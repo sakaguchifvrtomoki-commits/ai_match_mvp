@@ -2,7 +2,8 @@
 
 ## 現在の開発対象
 
-- 開発バージョンは `v0.2.2`、作業ブランチは `feature/v0.2.2-fastapi` とする。
+- 開発バージョンは `v0.2.2`、通常の開発ブランチは `feature/v0.2.2-fastapi` とする。
+- Phase 1の4 Agent開発では、後述する `agent/*` ブランチを正式な例外として使用する。
 - `v0.2.1` の既存Streamlit版を壊さず、Flutter向けFastAPIを段階的に追加する。
 - APIは1本ずつ実装し、各APIの実装ごとにテストする。
 - APIの詳細仕様は `docs/fairies_spec.md` を正とする。
@@ -32,3 +33,14 @@
 4. `POST /sessions/{session_id}/end`
 
 各APIの実装前に仕様とテスト観点を確認し、無関係な変更を混ぜないこと。
+
+## Phase 1の4 Agent運用
+
+Git worktreeごとに担当ブランチを固定し、次の分担で作業する。
+
+- `agent/backend`: `api/`、Python backend、Python tests
+- `agent/flutter`: `flutter_app/`、Flutter tests
+- `agent/test-review`: レビューとテストを中心に担当し、production codeは原則変更しない
+- `agent/integration`: 各Agentのcommit統合、競合対応、全テスト、統合後レビュー
+
+共通運用ルールは `docs/ai_development_team_rules.md` に従う。特に、各Agentは割り当てられたworktreeとbranchだけで作業し、担当外のproduction codeを変更しない。`reset`、`clean`、`rebase`、branch切り替えは禁止する。
