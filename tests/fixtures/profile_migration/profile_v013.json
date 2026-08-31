@@ -1,0 +1,54 @@
+{
+  "user_id": "fixture_user_v013",
+  "profile_update_count": 10,
+  "first_created_at": "2025-02-01T00:00:00",
+  "updated_at": "2025-02-10T00:00:00",
+  "profile_version": "0.1.3",
+  "summary": {
+    "stable": "計画性と柔軟さを併せ持つ",
+    "recent": "架空のイベントを準備中",
+    "growth": "周囲に相談できるようになった",
+    "tensions": ["丁寧さと速さの両立"],
+    "stable_candidates": [
+      {
+        "description": "準備をしつつ状況に合わせられる",
+        "status": "stable",
+        "support_count": 2,
+        "first_seen_session_id": "fixture_session_01",
+        "last_seen_session_id": "fixture_session_02",
+        "evidence": ["fixture_session_01", "fixture_session_02"],
+        "confidence": 0.8
+      }
+    ]
+  },
+  "personality_traits": {
+    "communication_style": "結論と理由を簡潔に伝える",
+    "decision_style": "期限から逆算する",
+    "emotional_tendency": "気持ちを書き出して整理する"
+  },
+  "values": ["信頼", "継続"],
+  "preferences": {
+    "relationship_style": "協力し合う関係",
+    "conversation_topics": ["架空の旅行計画"],
+    "dislikes": ["連絡なしの予定変更"]
+  },
+  "matching_hypothesis": {
+    "stable_good_match": "約束を守り柔軟に話せる人",
+    "recent_good_match": "一緒に計画を楽しめる人",
+    "likely_bad_match": "相談なく方針を変える人",
+    "reasoning_history": ["予定の共有を重視している"]
+  },
+  "confidence": {
+    "summary": 0.9,
+    "values": 0.8,
+    "matching_hypothesis": 0.7
+  },
+  "memory_notes": [],
+  "uncertainties": [],
+  "evidence": [
+    "fixture_session_01", "fixture_session_02", "fixture_session_03",
+    "fixture_session_04", "fixture_session_05", "fixture_session_06",
+    "fixture_session_07", "fixture_session_08", "fixture_session_09",
+    "fixture_session_10"
+  ]
+}

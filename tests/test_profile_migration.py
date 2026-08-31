@@ -9,9 +9,9 @@ spec = importlib.util.spec_from_file_location('app', Path(__file__).resolve().pa
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 
-FIXTURES_DIR = Path(__file__).resolve().parents[1] / 'user_profiles'
-FIXTURE_012 = FIXTURES_DIR / 'origin_260627_224857_4dd0c0.20260726_234651.bak'
-FIXTURE_013 = FIXTURES_DIR / 'origin_260627_224857_4dd0c0_copy.20260726_231610.bak'
+FIXTURES_DIR = Path(__file__).resolve().parent / 'fixtures' / 'profile_migration'
+FIXTURE_012 = FIXTURES_DIR / 'profile_v012.json'
+FIXTURE_013 = FIXTURES_DIR / 'profile_v013.json'
 
 
 def _load_fixture(path):
@@ -218,12 +218,12 @@ def test_t008_atomic_save_failure_keeps_original(tmp_path):
 
 
 # ===========================================================================
-# T009: 今回の実プロフィール復旧
+# T009: プロフィールリセットからの復旧
 # ===========================================================================
 
 def test_t009_recover_reset_profile_target1_update_9_to_10():
     old = mod.migrate_profile(_load_fixture(FIXTURE_012))
-    reset = _load_fixture(FIXTURES_DIR / 'origin_260627_224857_4dd0c0.json')
+    reset = _load_fixture(FIXTURES_DIR / 'reset_after_v012.json')
     session_id = next(e for e in reset['evidence'] if e not in old['evidence'])
 
     recovered = mod.recover_reset_profile(old, reset, session_id)
@@ -248,7 +248,7 @@ def test_t009_recover_reset_profile_target1_update_9_to_10():
 
 def test_t009_recover_reset_profile_target2_update_10_to_11():
     old = mod.migrate_profile(_load_fixture(FIXTURE_013))
-    reset = _load_fixture(FIXTURES_DIR / 'origin_260627_224857_4dd0c0_copy.json')
+    reset = _load_fixture(FIXTURES_DIR / 'reset_after_v013.json')
     session_id = next(e for e in reset['evidence'] if e not in old['evidence'])
 
     recovered = mod.recover_reset_profile(old, reset, session_id)

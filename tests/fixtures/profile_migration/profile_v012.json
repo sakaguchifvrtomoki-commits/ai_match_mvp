@@ -1,0 +1,38 @@
+{
+  "user_id": "fixture_user_v012",
+  "profile_update_count": 9,
+  "first_created_at": "2025-01-01T00:00:00",
+  "updated_at": "2025-01-09T00:00:00",
+  "profile_version": "0.1.2",
+  "summary": {
+    "stable": "穏やかで好奇心がある",
+    "recent": "新しい趣味を探している",
+    "growth": "自分の希望を言葉にできるようになった",
+    "tensions": ["予定と自由の両立"]
+  },
+  "personality_traits": {
+    "communication_style": "相手の話を聞いてから答える",
+    "decision_style": "情報を比較して決める",
+    "emotional_tendency": "落ち着いて気持ちを整理する"
+  },
+  "values": ["誠実さ", "お互いの自立"],
+  "preferences": {
+    "relationship_style": "対等な関係",
+    "conversation_topics": ["架空の小説", "散歩"],
+    "dislikes": ["一方的な決めつけ"]
+  },
+  "matching_hypothesis": {
+    "stable_good_match": "落ち着いて対話できる人",
+    "recent_good_match": "新しいことを一緒に楽しめる人",
+    "likely_bad_match": "価値観を押し付ける人",
+    "reasoning_history": ["対話のペースを大切にしている"]
+  },
+  "confidence": {
+    "summary": 0.8,
+    "values": 0.7,
+    "matching_hypothesis": 0.6
+  },
+  "memory_notes": ["架空の読書会に興味がある"],
+  "uncertainties": ["大人数の場の好みは未確認"],
+  "evidence": ["fixture_session_01", "fixture_session_02"]
+}

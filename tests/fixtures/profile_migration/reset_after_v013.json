@@ -1,0 +1,28 @@
+{
+  "user_id": "fixture_user_v013",
+  "updated_at": "2025-02-11T00:00:00",
+  "summary": {
+    "recent": "架空の勉強会を企画した",
+    "growth": "他の人に任せる範囲を広げた",
+    "tensions": [],
+    "stable_candidates": []
+  },
+  "personality_traits": {},
+  "personality_trait_candidates": {
+    "communication_style": [],
+    "decision_style": [],
+    "emotional_tendency": []
+  },
+  "values": ["協力"],
+  "preferences": {
+    "relationship_style": "役割を相談できる関係",
+    "conversation_topics": ["架空の勉強会"],
+    "conversation_topic_metadata": [{"display_name": "架空の勉強会", "canonical_key": "fictional_study_group"}],
+    "dislikes": []
+  },
+  "matching_hypothesis": {"stable_candidates": [], "reasoning_history_entries": []},
+  "confidence": {"summary": 0.8, "values": 0.8, "matching_hypothesis": 0.7},
+  "memory_notes": [],
+  "uncertainties": [],
+  "evidence": ["fixture_session_11"]
+}

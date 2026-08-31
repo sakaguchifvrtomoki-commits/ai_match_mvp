@@ -1,0 +1,32 @@
+{
+  "user_id": "fixture_user_v012",
+  "updated_at": "2025-01-10T00:00:00",
+  "summary": {
+    "recent": "架空の博物館へ行った",
+    "growth": "希望を早めに共有した",
+    "tensions": ["外出と休息のバランス"],
+    "stable_candidates": []
+  },
+  "personality_traits": {
+    "communication_style": "具体例を交えて話す",
+    "decision_style": "優先順位をつける",
+    "emotional_tendency": "気分転換に散歩する"
+  },
+  "personality_trait_candidates": {
+    "communication_style": [{"description": "具体例を交えて話す", "canonical_key": "uses_examples", "confidence": 0.7}],
+    "decision_style": [{"description": "優先順位をつける", "canonical_key": "sets_priorities", "confidence": 0.7}],
+    "emotional_tendency": [{"description": "気分転換に散歩する", "canonical_key": "walks_to_reset", "confidence": 0.6}]
+  },
+  "values": ["好奇心"],
+  "preferences": {
+    "relationship_style": "一緒に学べる関係",
+    "conversation_topics": ["架空の博物館"],
+    "conversation_topic_metadata": [{"display_name": "架空の博物館", "canonical_key": "fictional_museum"}],
+    "dislikes": []
+  },
+  "matching_hypothesis": {"stable_candidates": [], "reasoning_history_entries": []},
+  "confidence": {"summary": 0.7, "values": 0.7, "matching_hypothesis": 0.6},
+  "memory_notes": ["博物館の展示が好き"],
+  "uncertainties": [],
+  "evidence": ["fixture_session_01", "fixture_session_02", "fixture_session_10"]
+}
