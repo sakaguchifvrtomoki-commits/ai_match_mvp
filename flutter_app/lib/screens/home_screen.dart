@@ -1088,14 +1088,32 @@ class _ConsentScreen extends StatelessWidget {
                   ),
                 ],
                 const SizedBox(height: 12),
-                if (!state.isUserStorageReady)
-                  const Center(child: CircularProgressIndicator())
+                if (state.isUserIdLoading)
+                  const Center(
+                    child: CircularProgressIndicator(
+                      key: Key('user-id-loading'),
+                    ),
+                  )
                 else if (state.isLoading)
                   const _LoadingIndicator(
                     key: Key('session-loading'),
                     message: 'Fairyを呼んでいます…',
                   )
-                else ...[
+                else if (state.hasUserIdLoadFailed) ...[
+                  Text(
+                    state.storageErrorMessage!,
+                    key: const Key('storage-error'),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.error,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton(
+                    key: const Key('retry-user-id-load'),
+                    onPressed: state.retryUserIdLoad,
+                    child: const Text('ユーザー情報を再読み込み'),
+                  ),
+                ] else ...[
                   if (state.storageErrorMessage != null) ...[
                     Text(
                       state.storageErrorMessage!,
@@ -1118,7 +1136,7 @@ class _ConsentScreen extends StatelessWidget {
                   else
                     FilledButton(
                       key: const Key('start-chat'),
-                      onPressed: state.isUserStorageReady ? onContinue : null,
+                      onPressed: onContinue,
                       style: _primaryFilledButtonStyle,
                       child: const Text('チャットを開始する'),
                     ),

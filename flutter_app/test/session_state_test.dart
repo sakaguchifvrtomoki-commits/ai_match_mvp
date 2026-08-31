@@ -38,6 +38,7 @@ void main() {
         ),
       );
 
+      await waitForUserIdLoad(state);
       await state.startSession();
 
       expect(state.userId, 'user_123');
@@ -56,6 +57,7 @@ void main() {
       apiClient: FairiesApiClient(client: MockClient((_) => response.future)),
     );
 
+    await waitForUserIdLoad(state);
     final start = state.startSession();
     await Future<void>.delayed(Duration.zero);
     expect(state.isLoading, isTrue);
@@ -97,6 +99,7 @@ void main() {
         ),
       );
 
+      await waitForUserIdLoad(state);
       await state.startSession();
       expect(state.errorCode, 'SESSION_START_FAILED');
       expect(state.errorMessage, '再試行してください。');
@@ -127,6 +130,7 @@ void main() {
         }),
       ),
     );
+    await waitForUserIdLoad(state);
     await state.startSession();
 
     await state.sendMessage('  ユーザー発言  ');
@@ -187,6 +191,7 @@ void main() {
           }),
         ),
       );
+      await waitForUserIdLoad(state);
       await state.startSession();
 
       await state.sendMessage('残すユーザー発言');
@@ -231,6 +236,7 @@ void main() {
         }),
       ),
     );
+    await waitForUserIdLoad(state);
     await state.startSession();
 
     final firstSend = state.sendMessage('最初の発言');
@@ -532,6 +538,7 @@ void main() {
       ),
     );
 
+    await waitForUserIdLoad(state);
     await state.startSession();
 
     expect(state.isUserStorageReady, isTrue);
@@ -557,10 +564,170 @@ void main() {
       ),
     );
 
+    await waitForUserIdLoad(state);
     await state.startSession();
 
     expect(requestBody['user_id'], isNull);
     expect(storage.savedValues, ['user_created']);
+  });
+
+  test('a failed initial user ID load blocks session requests', () async {
+    var requests = 0;
+    final state = SessionState(
+      userStorage: FakeUserStorage(
+        loadAttempts: [() => Future<String?>.error(Exception('load failed'))],
+      ),
+      apiClient: FairiesApiClient(
+        client: MockClient((_) async {
+          requests += 1;
+          return jsonResponse({}, 500);
+        }),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(state.userIdLoadState, UserIdLoadState.failed);
+    await state.startSession();
+
+    expect(requests, 0);
+    expect(state.storageErrorCode, 'USER_ID_LOAD_FAILED');
+  });
+
+  test('a failed load and a successful empty load are distinct states', () async {
+    final failed = SessionState(
+      userStorage: FakeUserStorage(
+        loadAttempts: [() => Future<String?>.error(Exception('load failed'))],
+      ),
+    );
+    final empty = SessionState(userStorage: FakeUserStorage());
+    await Future<void>.delayed(Duration.zero);
+
+    expect(failed.userIdLoadState, UserIdLoadState.failed);
+    expect(failed.isUserStorageReady, isFalse);
+    expect(empty.userIdLoadState, UserIdLoadState.loaded);
+    expect(empty.isUserStorageReady, isTrue);
+    expect(empty.userId, isNull);
+    expect(empty.storageErrorMessage, isNull);
+  });
+
+  test('retry succeeds with a stored user ID', () async {
+    final storage = FakeUserStorage(
+      loadAttempts: [
+        () => Future<String?>.error(Exception('load failed')),
+        () => Future<String?>.value('user_recovered'),
+      ],
+    );
+    final state = SessionState(userStorage: storage);
+    await Future<void>.delayed(Duration.zero);
+
+    await state.retryUserIdLoad();
+
+    expect(state.userIdLoadState, UserIdLoadState.loaded);
+    expect(state.userId, 'user_recovered');
+    expect(state.storageErrorMessage, isNull);
+    expect(storage.loadCalls, 2);
+  });
+
+  test('retry succeeds when no stored user ID exists', () async {
+    final storage = FakeUserStorage(
+      loadAttempts: [
+        () => Future<String?>.error(Exception('load failed')),
+        () => Future<String?>.value(null),
+      ],
+    );
+    final state = SessionState(userStorage: storage);
+    await Future<void>.delayed(Duration.zero);
+
+    await state.retryUserIdLoad();
+
+    expect(state.userIdLoadState, UserIdLoadState.loaded);
+    expect(state.userId, isNull);
+    expect(state.storageErrorMessage, isNull);
+  });
+
+  test('a failed retry keeps session start blocked', () async {
+    var requests = 0;
+    final storage = FakeUserStorage(
+      loadAttempts: [
+        () => Future<String?>.error(Exception('initial failure')),
+        () => Future<String?>.error(Exception('retry failure')),
+      ],
+    );
+    final state = SessionState(
+      userStorage: storage,
+      apiClient: FairiesApiClient(
+        client: MockClient((_) async {
+          requests += 1;
+          return jsonResponse({}, 500);
+        }),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    await state.retryUserIdLoad();
+    await state.startSession();
+
+    expect(state.userIdLoadState, UserIdLoadState.failed);
+    expect(requests, 0);
+  });
+
+  test('session start stays blocked while a retry is incomplete', () async {
+    final retryLoad = Completer<String?>();
+    var requests = 0;
+    final storage = FakeUserStorage(
+      loadAttempts: [
+        () => Future<String?>.error(Exception('initial failure')),
+        () => retryLoad.future,
+      ],
+    );
+    final state = SessionState(
+      userStorage: storage,
+      apiClient: FairiesApiClient(
+        client: MockClient((_) async {
+          requests += 1;
+          return jsonResponse({
+            'user_id': 'user_recovered',
+            'session_id': 'session_recovered',
+            'message': {'role': 'assistant', 'content': '挨拶'},
+          }, 201);
+        }),
+      ),
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    final retrying = state.retryUserIdLoad();
+    await Future<void>.delayed(Duration.zero);
+    expect(state.userIdLoadState, UserIdLoadState.loading);
+    await state.startSession();
+    expect(requests, 0);
+
+    retryLoad.complete('user_recovered');
+    await retrying;
+    expect(state.userIdLoadState, UserIdLoadState.loaded);
+    expect(requests, 0);
+
+    await state.startSession();
+    expect(requests, 1);
+  });
+
+  test('duplicate user ID retries are ignored while loading', () async {
+    final retryLoad = Completer<String?>();
+    final storage = FakeUserStorage(
+      loadAttempts: [
+        () => Future<String?>.error(Exception('initial failure')),
+        () => retryLoad.future,
+      ],
+    );
+    final state = SessionState(userStorage: storage);
+    await Future<void>.delayed(Duration.zero);
+
+    final first = state.retryUserIdLoad();
+    await state.retryUserIdLoad();
+    expect(storage.loadCalls, 2);
+
+    retryLoad.complete(null);
+    await first;
+    expect(state.userIdLoadState, UserIdLoadState.loaded);
   });
 
   test('new session replaces session ID, messages and match only', () async {
@@ -579,6 +746,7 @@ void main() {
         }),
       ),
     );
+    await waitForUserIdLoad(state);
     await state.startSession();
     state.messages.add(const ChatMessage(role: 'user', content: '前回の発言'));
     state.matchResponse = MatchResponse.fromJson(_matchJson());
@@ -607,6 +775,7 @@ void main() {
       ),
     );
 
+    await waitForUserIdLoad(state);
     await state.startSession();
 
     expect(state.userId, 'user_unsaved');
@@ -617,7 +786,7 @@ void main() {
   });
 
   test(
-    'does not request a session before stored ID loading completes',
+    'does not request a session until stored ID loading completes',
     () async {
       final load = Completer<String?>();
       var requests = 0;
@@ -635,28 +804,51 @@ void main() {
         ),
       );
 
-      final starting = state.startSession();
+      await state.startSession();
       await Future<void>.delayed(Duration.zero);
       expect(state.isUserStorageReady, isFalse);
       expect(requests, 0);
 
       load.complete('user_delayed');
-      await starting;
+      await Future<void>.delayed(Duration.zero);
+      expect(state.isUserStorageReady, isTrue);
+      expect(requests, 0);
+
+      await state.startSession();
       expect(requests, 1);
     },
   );
 }
 
+Future<void> waitForUserIdLoad(SessionState state) async {
+  while (state.isUserIdLoading) {
+    await Future<void>.delayed(Duration.zero);
+  }
+}
+
 class FakeUserStorage implements UserStorage {
-  FakeUserStorage({this.value, this.failSave = false, this.loadCompleter});
+  FakeUserStorage({
+    this.value,
+    this.failSave = false,
+    this.loadCompleter,
+    this.loadAttempts,
+  });
 
   String? value;
   final bool failSave;
   final Completer<String?>? loadCompleter;
+  final List<Future<String?> Function()>? loadAttempts;
   final List<String> savedValues = [];
+  int loadCalls = 0;
 
   @override
-  Future<String?> loadUserId() => loadCompleter?.future ?? Future.value(value);
+  Future<String?> loadUserId() {
+    final attempt = loadCalls++;
+    if (loadAttempts != null && attempt < loadAttempts!.length) {
+      return loadAttempts![attempt]();
+    }
+    return loadCompleter?.future ?? Future.value(value);
+  }
 
   @override
   Future<void> saveUserId(String userId) async {

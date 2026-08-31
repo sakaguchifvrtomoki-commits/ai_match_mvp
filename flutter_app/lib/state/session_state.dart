@@ -8,16 +8,17 @@ import '../services/user_storage.dart';
 
 enum SessionErrorAction { sessionStart, chat, match, end }
 
+enum UserIdLoadState { loading, loaded, failed }
+
 class SessionState extends ChangeNotifier {
   SessionState({FairiesApiClient? apiClient, UserStorage? userStorage})
     : _apiClient = apiClient ?? FairiesApiClient(),
       _userStorage = userStorage ?? const SharedPreferencesUserStorage() {
-    _userStorageInitialization = _loadStoredUserId();
+    _loadStoredUserId();
   }
 
   final FairiesApiClient _apiClient;
   final UserStorage _userStorage;
-  late final Future<void> _userStorageInitialization;
 
   String? userId;
   String? sessionId;
@@ -31,13 +32,17 @@ class SessionState extends ChangeNotifier {
   String? errorCode;
   String? errorMessage;
   SessionErrorAction? errorAction;
-  bool isUserStorageReady = false;
+  UserIdLoadState userIdLoadState = UserIdLoadState.loading;
   String? storageErrorCode;
   String? storageErrorMessage;
   bool _canRetryLastChat = false;
   int? _lastMatchedUserMessageCount;
 
   bool get hasSession => userId != null && sessionId != null;
+  bool get isUserStorageReady => userIdLoadState == UserIdLoadState.loaded;
+  bool get isUserIdLoading => userIdLoadState == UserIdLoadState.loading;
+  bool get hasUserIdLoadFailed =>
+      userIdLoadState == UserIdLoadState.failed;
   bool get canRetryLastChat => _canRetryLastChat;
   int get userMessageCount => messages
       .where(
@@ -67,8 +72,7 @@ class SessionState extends ChangeNotifier {
     String? existingUserId,
     bool logConsent = true,
   }) async {
-    await _userStorageInitialization;
-    if (isLoading || isMatching || isEnding) return;
+    if (!isUserStorageReady || isLoading || isMatching || isEnding) return;
     isLoading = true;
     errorCode = null;
     errorMessage = null;
@@ -111,13 +115,25 @@ class SessionState extends ChangeNotifier {
     try {
       final storedUserId = await _userStorage.loadUserId();
       userId ??= storedUserId;
+      userIdLoadState = UserIdLoadState.loaded;
+      if (storageErrorCode == 'USER_ID_LOAD_FAILED') {
+        storageErrorCode = null;
+        storageErrorMessage = null;
+      }
     } catch (_) {
+      userIdLoadState = UserIdLoadState.failed;
       storageErrorCode = 'USER_ID_LOAD_FAILED';
       storageErrorMessage = '保存済みのユーザー情報を読み込めませんでした。';
     } finally {
-      isUserStorageReady = true;
       notifyListeners();
     }
+  }
+
+  Future<void> retryUserIdLoad() async {
+    if (!hasUserIdLoadFailed) return;
+    userIdLoadState = UserIdLoadState.loading;
+    notifyListeners();
+    await _loadStoredUserId();
   }
 
   Future<void> sendMessage(String text) async {

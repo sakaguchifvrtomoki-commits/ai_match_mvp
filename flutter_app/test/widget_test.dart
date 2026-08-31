@@ -5,6 +5,7 @@ import 'package:fairies_app/screens/home_screen.dart';
 import 'package:fairies_app/models/chat_message.dart';
 import 'package:fairies_app/models/match_response.dart';
 import 'package:fairies_app/services/fairies_api_client.dart';
+import 'package:fairies_app/services/user_storage.dart';
 import 'package:fairies_app/state/session_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -110,6 +111,77 @@ void main() {
     await tester.pump();
     expect(find.text('ログ保存への同意確認'), findsOneWidget);
     expect(find.byKey(const Key('consent-accept')), findsOneWidget);
+  });
+
+  testWidgets(
+    'failed user ID load blocks start and retry enables it after recovery',
+    (WidgetTester tester) async {
+      final retryLoad = Completer<String?>();
+      final storage = WidgetUserStorage([
+        () => Future<String?>.error(Exception('initial failure')),
+        () => retryLoad.future,
+      ]);
+      var requests = 0;
+      Map<String, dynamic>? requestBody;
+      final state = SessionState(
+        userStorage: storage,
+        apiClient: FairiesApiClient(
+          client: MockClient((request) async {
+            requests += 1;
+            requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+            return jsonResponse({
+              'user_id': 'user_recovered',
+              'session_id': 'session_recovered',
+              'message': {'role': 'assistant', 'content': '復旧後の挨拶'},
+            }, 201);
+          }),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(home: HomeScreen(sessionState: state)),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('storage-error')), findsOneWidget);
+      expect(find.byKey(const Key('retry-user-id-load')), findsOneWidget);
+      expect(find.byKey(const Key('start-chat')), findsNothing);
+      expect(requests, 0);
+
+      await tester.ensureVisible(find.byKey(const Key('retry-user-id-load')));
+      await tester.tap(find.byKey(const Key('retry-user-id-load')));
+      await tester.pump();
+      expect(storage.loadCalls, 2);
+      expect(find.byKey(const Key('user-id-loading')), findsOneWidget);
+      expect(find.byKey(const Key('start-chat')), findsNothing);
+      expect(requests, 0);
+
+      retryLoad.complete('user_recovered');
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('storage-error')), findsNothing);
+      expect(find.byKey(const Key('retry-user-id-load')), findsNothing);
+      expect(find.byKey(const Key('start-chat')), findsOneWidget);
+
+      await acceptConsentAndStart(tester);
+      expect(requests, 1);
+      expect(requestBody?['user_id'], 'user_recovered');
+      expect(find.text('復旧後の挨拶'), findsOneWidget);
+    },
+  );
+
+  testWidgets('an empty successful user ID load shows no storage error', (
+    WidgetTester tester,
+  ) async {
+    final state = SessionState(
+      userStorage: WidgetUserStorage([() async => null]),
+    );
+    await tester.pumpWidget(MaterialApp(home: HomeScreen(sessionState: state)));
+    await tester.pumpAndSettle();
+
+    expect(state.userIdLoadState, UserIdLoadState.loaded);
+    expect(state.userId, isNull);
+    expect(find.byKey(const Key('storage-error')), findsNothing);
+    expect(find.byKey(const Key('retry-user-id-load')), findsNothing);
+    expect(find.byKey(const Key('start-chat')), findsOneWidget);
   });
 
   testWidgets('shows session loading until the initial greeting arrives', (
@@ -1290,4 +1362,25 @@ class ControlledStreamClient extends http.BaseClient {
   }
 
   Future<void> closeStream() => _controller.close();
+}
+
+class WidgetUserStorage implements UserStorage {
+  WidgetUserStorage(this.loadAttempts);
+
+  final List<Future<String?> Function()> loadAttempts;
+  int loadCalls = 0;
+  String? value;
+
+  @override
+  Future<String?> loadUserId() {
+    final attempt = loadCalls++;
+    if (attempt < loadAttempts.length) return loadAttempts[attempt]();
+    return Future<String?>.value(value);
+  }
+
+  @override
+  Future<void> saveUserId(String userId) async => value = userId;
+
+  @override
+  Future<void> clearUserId() async => value = null;
 }
