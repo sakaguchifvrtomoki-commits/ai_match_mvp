@@ -340,9 +340,20 @@ foreach ($worktree in @($orchestratorBaseline.Worktree, $testReviewBaseline.Work
     }
 }
 
-$codexCommand = Get-Command -Name 'codex' -CommandType Application -ErrorAction Stop
-if ($codexCommand.Count -ne 1) {
-    throw 'Codex CLI resolution is ambiguous.'
+$codexCommandPaths = @(
+    Get-Command -Name 'codex.cmd' -CommandType Application -All -ErrorAction SilentlyContinue |
+        ForEach-Object { [System.IO.Path]::GetFullPath($_.Source) } |
+        Sort-Object -Unique
+)
+if ($codexCommandPaths.Count -eq 0) {
+    throw 'Codex CLI could not be resolved: codex.cmd was not found on PATH.'
+}
+if ($codexCommandPaths.Count -gt 1) {
+    throw "Codex CLI resolution is ambiguous: multiple codex.cmd files were found on PATH: $($codexCommandPaths -join ', ')"
+}
+$codexPath = $codexCommandPaths[0]
+if (-not [System.IO.File]::Exists($codexPath)) {
+    throw "Resolved Codex CLI does not exist: $codexPath"
 }
 
 if (-not [System.IO.Directory]::Exists($normalizedRunsRoot)) {
@@ -405,7 +416,7 @@ TASK BRIEF: BLOCKED
 
 try {
     Invoke-CodexReadOnly `
-        -CodexPath $codexCommand.Source `
+        -CodexPath $codexPath `
         -Worktree $orchestratorBaseline.Worktree `
         -Prompt $orchestratorPrompt `
         -OutputPath $taskBriefPath
@@ -448,7 +459,7 @@ Only that final non-empty line is machine evaluated.
 
 try {
     Invoke-CodexReadOnly `
-        -CodexPath $codexCommand.Source `
+        -CodexPath $codexPath `
         -Worktree $testReviewBaseline.Worktree `
         -Prompt $reviewPrompt `
         -OutputPath $reviewPath
