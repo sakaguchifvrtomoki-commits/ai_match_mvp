@@ -284,7 +284,7 @@ function Invoke-CodexReadOnly {
     $startInfo.StandardOutputEncoding = $script:Utf8NoBom
     $startInfo.StandardErrorEncoding = $script:Utf8NoBom
     foreach ($argument in @(
-        'exec', '--sandbox', 'read-only', '--ask-for-approval', 'never',
+        'exec', '--ephemeral', '--sandbox', 'read-only',
         '--cd', $Worktree, '--color', 'never', '--output-last-message', $OutputPath, '-'
     )) {
         [void]$startInfo.ArgumentList.Add($argument)
