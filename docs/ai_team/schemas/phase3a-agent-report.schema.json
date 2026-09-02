@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase3a-agent-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "agent_id", "status", "observed_worktree", "observed_branch", "observed_head", "summary", "findings", "unverified_items"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "agent_id": { "enum": ["backend", "flutter"] },
+    "status": { "enum": ["SUCCESS", "BLOCKED"] },
+    "observed_worktree": { "type": "string", "minLength": 1 },
+    "observed_branch": { "type": "string", "minLength": 1 },
+    "observed_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "summary": { "type": "string", "minLength": 1 },
+    "findings": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "unverified_items": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

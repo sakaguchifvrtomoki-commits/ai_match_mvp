@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase3a-runtime-review-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "review_type", "reviewed_agent_ids", "acceptance_criteria_results", "findings", "unverified_items", "review_verdict", "final_result"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "task_id": { "type": "string", "minLength": 1 }, "review_type": { "const": "RUNTIME" },
+    "reviewed_agent_ids": { "type": "array", "uniqueItems": true, "items": { "enum": ["backend", "flutter"] } },
+    "acceptance_criteria_results": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/ac" } },
+    "findings": { "type": "array", "items": { "$ref": "#/$defs/finding" } },
+    "unverified_items": { "type": "array", "items": { "type": "string" } },
+    "review_verdict": { "enum": ["APPROVE", "REQUEST_CHANGES"] }, "final_result": { "enum": ["READY", "BLOCKED"] }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "findings": { "contains": { "properties": { "severity": { "enum": ["BLOCKER", "MAJOR"] } }, "required": ["severity"] } } } },
+      "then": { "properties": { "review_verdict": { "const": "REQUEST_CHANGES" }, "final_result": { "const": "BLOCKED" } } }
+    },
+    {
+      "if": { "properties": { "review_verdict": { "const": "REQUEST_CHANGES" } }, "required": ["review_verdict"] },
+      "then": { "properties": { "final_result": { "const": "BLOCKED" } } }
+    },
+    {
+      "if": { "properties": { "final_result": { "const": "READY" } }, "required": ["final_result"] },
+      "then": { "properties": { "review_verdict": { "const": "APPROVE" }, "findings": { "not": { "contains": { "properties": { "severity": { "enum": ["BLOCKER", "MAJOR"] } }, "required": ["severity"] } } } } }
+    },
+    {
+      "if": { "properties": { "review_verdict": { "const": "APPROVE" }, "final_result": { "const": "READY" } }, "required": ["review_verdict", "final_result"] },
+      "then": { "properties": { "findings": { "items": { "allOf": [{ "if": { "properties": { "severity": { "const": "MINOR" } }, "required": ["severity"] }, "then": { "required": ["acceptance_reason", "impact_assessment", "follow_up"] } }] } } } }
+    }
+  ],
+  "$defs": {
+    "ac": { "type": "object", "additionalProperties": false, "required": ["criterion", "result"], "properties": { "criterion": { "type": "string", "minLength": 1 }, "result": { "enum": ["PASS", "BLOCKED"] }, "notes": { "type": "string" } } },
+    "finding": { "type": "object", "additionalProperties": false, "required": ["severity", "location", "reproduction_condition", "expected_result"], "properties": { "severity": { "enum": ["BLOCKER", "MAJOR", "MINOR"] }, "location": { "type": "string", "minLength": 1 }, "reproduction_condition": { "type": "string", "minLength": 1 }, "expected_result": { "type": "string", "minLength": 1 }, "acceptance_reason": { "type": "string", "minLength": 1 }, "impact_assessment": { "type": "string", "minLength": 1 }, "follow_up": { "type": "string", "minLength": 1 } } }
+  }
+}

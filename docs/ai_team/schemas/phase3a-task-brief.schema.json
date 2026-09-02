@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase3a-task-brief.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "execution_strategy", "sequential_order", "agents"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "execution_strategy": { "enum": ["PARALLEL", "SEQUENTIAL"] },
+    "sequential_order": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": { "enum": ["backend", "flutter"] }
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": { "$ref": "#/$defs/agent" }
+    }
+  },
+  "$defs": {
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent_id", "disposition", "worktree_absolute_path", "git_top_level", "branch", "expected_head", "run_mode", "allowed_files", "read_targets", "instructions", "dependencies"],
+      "properties": {
+        "agent_id": { "enum": ["backend", "flutter", "test_review"] },
+        "disposition": { "enum": ["RUN", "SKIP"] },
+        "worktree_absolute_path": { "type": "string", "pattern": "^[A-Za-z]:[\\\\/]" },
+        "git_top_level": { "type": "string", "pattern": "^[A-Za-z]:[\\\\/]" },
+        "branch": { "type": "string", "minLength": 1 },
+        "expected_head": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "run_mode": { "const": "READ_ONLY" },
+        "allowed_files": { "type": "array", "maxItems": 0 },
+        "read_targets": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "instructions": { "type": "string" },
+        "dependencies": { "type": "array", "uniqueItems": true, "items": { "enum": ["backend", "flutter"] } }
+      }
+    }
+  }
+}
