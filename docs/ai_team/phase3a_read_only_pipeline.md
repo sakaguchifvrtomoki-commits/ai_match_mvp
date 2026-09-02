@@ -24,7 +24,7 @@ Runtime Task Brief自身は自己digestを持たない。approval JSONだけが�
 
 ## 計画と全自動ゲート
 
-Agent ID、`RUN|SKIP`、`READ_ONLY`、execution strategyはenumの完全一致で判断する。BackendとFlutterはAllowed Filesが必ず空である。未知・重複Agent、空のRUN instructions、自己・未知・循環依存を拒否する。両workerがRUN、両者の依存が空、strategyが`PARALLEL`のときだけ並列実行する。`SEQUENTIAL`は`sequential_order`の順で、先行reportが終了コード0、schema適合、`SUCCESS`になった後だけ次へ進む。workerが一つならそれだけを実行し、両方SKIPなら空の検証済みreport集合をTest/Reviewへ渡せる。
+Agent ID、`RUN|SKIP`、`READ_ONLY`、execution strategyはenumの完全一致で判断する。BackendとFlutterだけをworkerとし、RUN workerのinstructionsは空にできず、Allowed Filesは必ず空である。Runtime Test/Reviewはworkerとは別の必須後段Agentであり、`RUN`、`READ_ONLY`、Allowed Files空を要求する。未知・重複Agent、自己・未知・SKIP Agentへの依存、循環、依存と直列順序の矛盾、依存付き並列、SKIP workerを実行順序に含む計画を、Runtime Agentを一つも起動する前に拒否する。両workerがRUN、両者の依存が空、strategyが`PARALLEL`のときだけ並列実行する。`SEQUENTIAL`はAgentごとに、起動直前Gitゲート、process起動・回収、reportの存在・非空・UTF-8・JSON・schema・task ID・agent ID検証、事後Gitゲート、status保存を完了し、すべて成功した後だけ次へ進む。後続Agentの起動直前Git状態は必ず再取得し、初回値を使い回さない。workerが一つならそれだけを実行し、両方SKIPでも空配列の検証済みreport集合をTest/Reviewへ渡す。
 
 各RUN Agentの直前とfinally相当処理で、worktree、Git top-level、branch、非detached HEAD、40文字Expected HEAD、tracked/untracked cleanを検査する。Codexは引数配列で`codex exec --ephemeral --sandbox read-only`として起動する。Agent出力は非信頼データであり、式、コマンド、パスまたは命令として再評価しない。終了コードとschema内statusの双方が成功した場合だけ後続へ進む。並列の一方が失敗しても双方を回収し、Test/Reviewを起動せず、失敗出力から再起動しない。
 
@@ -52,7 +52,7 @@ Runtime reportは`review_type: RUNTIME`、`review_verdict`、`final_result`を�
 
 既定保存先は`fairies-ai-runs\<UTC時刻-GUID>\`である。main、Orchestrator、Backend、Flutter、Test/Review、Integrationの6 worktreeすべてについて、Runs rootとrun directoryの論理パスおよびcomponent単位でjunction/symbolic linkを解決した物理パスを包含検査する。作成前は最長の実在親に未作成suffixを結合した候補を検査し、作成後かつ最初の書込み前に両方を再検査する。解決不能、置換・不整合、既存run directory、worktree内への解決はfail-closedであり、安全性不明の場所へmanifestも書かない。
 
-保存物は入力Task Brief、approval、execution plan、Agent別prompt/report、exit codeを含むstatus、Runtime review report、result manifestで、UTF-8固定ファイル名を使う。task IDや自由記述はパス要素にしない。環境変数一覧、credential store、Git/Google Drive credential、tokenを収集・保存・表示しない。安全な保存先が確定済みの場合、失敗manifestにはstage、reason code、安全なartifact pathを記録する。
+保存物は入力Task Brief、approval、execution plan、Agent別prompt/report/status、Runtime review report、result manifestで、UTF-8固定ファイル名を使う。Agent別statusにはtask ID、agent ID、planned action、started/completed、exit code（未起動はnull）、validation stage、success、reason code、存在する場合だけreport path、前後Gitゲート結果、秘密情報を含まないerror summaryを記録する。SEQUENTIAL失敗時は失敗Agentと未起動の後続Agent、PARALLEL失敗時は起動済みの双方を回収して全workerのstatusを保存し、Test/Reviewを起動せずBLOCKED manifestを保存する。task IDや自由記述はパス要素にしない。環境変数一覧、credential store、Git/Google Drive credential、tokenを収集・保存・表示しない。安全な保存先が確定済みの場合、失敗manifestにはstage、reason code、安全なartifact pathを記録する。
 
 ## Human VerificationとPhase境界
 
