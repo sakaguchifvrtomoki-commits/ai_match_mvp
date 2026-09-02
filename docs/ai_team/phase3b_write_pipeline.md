@@ -32,6 +32,8 @@ Phase 3B専用schemaは次の6件である。
 9. 全workerとtest成功後だけTest/Reviewを起動し、reviewed artifact digestを親pipelineのdigestと照合する。
 10. APPROVE、BLOCKER／MAJORなし、digest一致の場合だけ`READY_FOR_PHASE3C` manifestを作る。Phase 3B Runtime内ではstage、commit、merge、Integration起動を行わない。
 
+PARALLEL実行はprocess startとcollectionを分離し、各start直前にapproval gateを再実行する。途中のstart失敗・digest変更・timeout・片系失敗でも開始済みprocessを全件回収する。SEQUENTIAL実行は先行processの成功を回収してから次を開始する。
+
 ## fail-closed制御
 
 schema、approval、digest、Agent集合、dependency、順序、path、artifact destination、Git identityまたはclean stateの不一致ではAgentを起動しない。WRITE不能でも権限昇格しない。worker非ゼロ、timeout、report欠落・不正、staged変更、許可外差分、test失敗またはreview拒否ではTest/ReviewまたはPhase 3Cへ進めない。REQUEST_CHANGES後の自動修正loop、rollback、reset、clean、checkout、rebaseおよびbranch切替は行わない。安全なartifact directoryが確定済みの場合だけ、秘密情報を含めないreason code付きfailure evidenceを保存できる。
@@ -39,6 +41,8 @@ schema、approval、digest、Agent集合、dependency、順序、path、artifact
 ## artifactとPhase 3C handoff
 
 artifact rootにはworktree外の明示pathを使用し、Task Brief／Approval原本、Agent report、Git evidence、差分／untracked artifact、test evidence、review reportおよびmanifestを保存する。自由記述やtask IDをpath要素へ使用せず、credential、token、環境変数一覧を収集しない。
+
+authoritative schema 6件、各processの実argv・working directory・開始終了時刻・exit code・timeout・stdout/stderr、schema-valid Agent status、binary patch、content-addressed untracked bytes、change bundle、固定review入力、開始時／postflight Git evidenceおよび最終artifact inventoryを保存する。失敗manifestは実際のvalidation stageと専用reason codeを保持する。
 
 Phase 3Cへ渡せるのはAPPROVE済みのimmutableな差分bundleまたはpatch、Baseline SHA、各SHA-256、staged files 0件のevidence、test evidence、review reportおよびmanifestだけである。Phase 3Cは同一digestを再検証してからcommitする。
 

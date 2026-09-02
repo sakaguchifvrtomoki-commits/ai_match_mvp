@@ -10,7 +10,7 @@
     "task_id": { "type": "string", "minLength": 1 },
     "baseline_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
     "task_brief_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
-    "stage": { "enum": ["PREFLIGHT", "WORKER_EXECUTION", "TEST_EXECUTION", "REVIEW_EXECUTION", "COMPLETE", "BLOCKED"] },
+    "stage": { "enum": ["PREFLIGHT", "INPUT_VALIDATION", "PATH_VALIDATION", "WORKER_START", "WORKER_COLLECTION", "REPORT_VALIDATION", "ARTIFACT_GENERATION", "TEST_EXECUTION", "REVIEW_START", "REVIEW_COLLECTION", "REVIEW_VALIDATION", "COMPLETE"] },
     "reason_code": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
     "safe_artifact_directory": { "type": "string", "minLength": 1 },
     "artifact_bundle_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },

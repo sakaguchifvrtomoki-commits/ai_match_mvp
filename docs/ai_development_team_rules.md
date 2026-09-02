@@ -49,6 +49,8 @@ Test/ReviewのAPPROVEと`READY_FOR_PHASE3C`が揃うまで統合を開始しな�
 commit handoff、担当範囲および禁止操作はこの将来Runtime例外によって変更されず、
 既存作業を遡及的に正当化しない。
 
+PARALLEL Runtimeは全workerの起動を先に完了してから回収を開始し、各workerおよびTest/Reviewの起動直前に承認raw-byte digestを再検証する。安全なartifact directory確定後の失敗は、実stageと専用reason codeを持つstatus／BLOCKED manifestとして固定する。
+
 ## テストコマンド
 
 Pythonテストは各worktreeのルートで、共有仮想環境を使って実行する。

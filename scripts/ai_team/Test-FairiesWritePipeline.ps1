@@ -1,176 +1,72 @@
 #requires -Version 7.0
-[CmdletBinding()]
-param()
-
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
-$root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
-$pipeline = Join-Path $PSScriptRoot 'Invoke-FairiesWritePipeline.ps1'
-$schemaRoot = Join-Path $root 'docs\ai_team\schemas'
-$temporaryRoot = Join-Path ([IO.Path]::GetTempPath()) ('fairies-phase3b-test-' + [Guid]::NewGuid().ToString('N'))
-$passed = [Collections.Generic.List[string]]::new()
-
-function Assert-True([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
-function Assert-Throws([scriptblock]$Action, [string]$Pattern, [string]$Name) {
-    try { & $Action; throw "Expected rejection was not raised: $Name" }
-    catch { if ($_.Exception.Message -like "Expected rejection was not raised:*") { throw }; if ($_.Exception.Message -notmatch $Pattern) { throw "Unexpected rejection for $Name`: $($_.Exception.Message)" } }
-    $passed.Add($Name)
+$ErrorActionPreference='Stop'
+$repoRoot=(Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+$pipeline=Join-Path $PSScriptRoot 'Invoke-FairiesWritePipeline.ps1'
+$schemaRoot=Join-Path $repoRoot 'docs\ai_team\schemas'
+$temporaryRoot=Join-Path ([IO.Path]::GetTempPath()) ("fairies-phase3b-test-"+[Guid]::NewGuid().ToString('N'))
+$reviewArtifactRoot='C:\Users\sakag\AppData\Local\Temp\fairies-phase3b-correction-001'
+$approvedInputRoot='C:\Users\sakag\other\fairies-ai-runs\20260902T152525797Z-ad9a6de91e7d47039e0bcc1ffa0d6ed0'
+$utf8=[Text.UTF8Encoding]::new($false)
+$passed=[Collections.Generic.List[string]]::new()
+function Assert($Value,[string]$Message){if(-not$Value){throw "ASSERTION_FAILED: $Message"}}
+function WriteText([string]$Path,[string]$Text){[void][IO.Directory]::CreateDirectory((Split-Path $Path -Parent));[IO.File]::WriteAllText($Path,$Text,$utf8)}
+function Git([string]$Repo,[string[]]$GitArguments){$o=& git.exe -C $Repo @GitArguments 2>&1;if($LASTEXITCODE){throw "fixture git failed: $o"};($o-join"`n").Trim()}
+function NewRepo([string]$Name,[string]$Branch){$p=Join-Path $temporaryRoot $Name;[void][IO.Directory]::CreateDirectory($p);[void](Git $p @('init','--initial-branch',$Branch));[void](Git $p @('config','user.name','fixture'));[void](Git $p @('config','user.email','fixture@example.invalid'));WriteText (Join-Path $p 'base.txt') 'base';[void](Git $p @('add','base.txt'));$oldAuthor=$env:GIT_AUTHOR_DATE;$oldCommitter=$env:GIT_COMMITTER_DATE;try{$env:GIT_AUTHOR_DATE='2000-01-01T00:00:00Z';$env:GIT_COMMITTER_DATE='2000-01-01T00:00:00Z';[void](Git $p @('commit','-m','base'))}finally{$env:GIT_AUTHOR_DATE=$oldAuthor;$env:GIT_COMMITTER_DATE=$oldCommitter};$p}
+function Agent([string]$Id,[string]$Repo,[string]$Mode='WRITE',[string]$Disposition='RUN',[string[]]$Deps=@(),[object[]]$Tests=@()){$allowed=[string[]]@();if($Disposition-ceq'RUN'-and$Mode-ceq'WRITE'){$allowed=[string[]]@('allowed.txt')};@{agent_id=$Id;disposition=$Disposition;worktree_absolute_path=$Repo;git_top_level=$Repo;branch=(Git $Repo @('branch','--show-current'));expected_head=(Git $Repo @('rev-parse','HEAD'));run_mode=$Mode;allowed_files=$allowed;forbidden_files=[string[]]@('secret.txt');instructions=$(if($Disposition-ceq'RUN'){'fixture'}else{''});test_commands=[object[]]$Tests;dependencies=[string[]]$Deps}}
+function SaveInputs($Brief,[string]$Name){$d=Join-Path $temporaryRoot $Name;[void][IO.Directory]::CreateDirectory($d);$bp=Join-Path $d 'brief.json';WriteText $bp ($Brief|ConvertTo-Json -Depth 30);$sha=(Get-FileHash -Algorithm SHA256 $bp).Hash.ToLowerInvariant();$ap=Join-Path $d 'approval.json';WriteText $ap (@{schema_version='1.0';task_id=$Brief.task_id;verdict='APPROVE';task_brief_sha256=$sha}|ConvertTo-Json -Compress);@($bp,$ap)}
+function LatestRun([string]$Root){Get-ChildItem -LiteralPath $Root -Directory|Sort-Object Name|Select-Object -Last 1}
+function FileRecord([string]$Root,[IO.FileInfo]$File){[ordered]@{path=[IO.Path]::GetRelativePath($Root,$File.FullName).Replace('\','/');size=[long]$File.Length;sha256=(Get-FileHash -LiteralPath $File.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}}
+function AssertInventory([string]$Root){
+ $inventoryPath=Join-Path $Root 'artifact-inventory.json';$expected=@(Get-ChildItem -LiteralPath $Root -File -Recurse|Where-Object{-not$_.FullName.Equals($inventoryPath,[StringComparison]::OrdinalIgnoreCase)}|Sort-Object FullName|ForEach-Object{FileRecord $Root $_});$actual=@(Get-Content -Raw -LiteralPath $inventoryPath|ConvertFrom-Json)
+ Assert ($actual.Count-eq$expected.Count) 'inventory missing or extra entry'
+ for($i=0;$i-lt$expected.Count;$i++){Assert ($actual[$i].path-ceq$expected[$i].path) 'inventory path mismatch';Assert ([long]$actual[$i].size-eq$expected[$i].size) 'inventory size mismatch';Assert ($actual[$i].sha256-ceq$expected[$i].sha256) 'inventory digest mismatch';Assert (-not[IO.Path]::IsPathFullyQualified($actual[$i].path)) 'inventory absolute path';Assert ($actual[$i].path-notmatch'(^|/)\.\.(/|$)') 'inventory path escape'}
 }
-function Invoke-TestGit([string]$Repo, [string[]]$Arguments) {
-    $result = Invoke-F3BProcess git (@('-C',$Repo) + $Arguments) $Repo 30
-    if ($result.ExitCode -ne 0) { throw "Fixture Git failure: $($result.Stderr)" }
-    $result.Stdout.Trim()
+function PersistReviewArtifacts([IO.DirectoryInfo]$ReadyRun,[IO.DirectoryInfo]$BlockedRun){
+ $resolved=[IO.Path]::GetFullPath($reviewArtifactRoot);$temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());Assert ($resolved.StartsWith($temp,[StringComparison]::OrdinalIgnoreCase)) 'review artifact root outside temp';Assert ([IO.Path]::GetFileName($resolved)-ceq'fairies-phase3b-correction-001') 'unexpected review artifact root'
+ if([IO.Directory]::Exists($resolved)){Get-ChildItem -LiteralPath $resolved -Force|Remove-Item -Recurse -Force}else{[void][IO.Directory]::CreateDirectory($resolved)}
+ Copy-Item -LiteralPath $ReadyRun.FullName -Destination (Join-Path $resolved 'runtime-ready') -Recurse
+ Copy-Item -LiteralPath $BlockedRun.FullName -Destination (Join-Path $resolved 'runtime-blocked') -Recurse
+ [IO.File]::WriteAllBytes((Join-Path $resolved 'approved-task-brief.txt'),[IO.File]::ReadAllBytes((Join-Path $approvedInputRoot 'task-brief.txt')))
+ [IO.File]::WriteAllBytes((Join-Path $resolved 'human-approval.json'),[IO.File]::ReadAllBytes((Join-Path $approvedInputRoot 'human-approval.json')))
+ Copy-Item -Path (Join-Path $schemaRoot 'phase3b-*.schema.json') -Destination $resolved
+ $output=@("Phase 3B runtime harness passed $($passed.Count) groups")+@($passed|ForEach-Object{"PASS: $_"});WriteText (Join-Path $resolved 'harness-stdout.txt') ($output-join"`r`n");[IO.File]::WriteAllBytes((Join-Path $resolved 'harness-stderr.txt'),[byte[]]@())
+ WriteText (Join-Path $resolved 'harness-evidence.json') (@{executable='pwsh';argv=@('-NoProfile','-NonInteractive','-File','scripts/ai_team/Test-FairiesWritePipeline.ps1');working_directory=$repoRoot;exit_code=0;timed_out=$false;production_codex=$false;network=$false;external_services=$false;android=$false;google_drive=$false}|ConvertTo-Json -Depth 10)
+ $restoreRoot=Join-Path $temporaryRoot 'restore';[void][IO.Directory]::CreateDirectory($restoreRoot);$metadata=Get-Content -Raw (Join-Path $resolved 'runtime-ready/backend-change-metadata.json')|ConvertFrom-Json;$restoredRepo=Join-Path $restoreRoot 'repo';Copy-Item -LiteralPath $r1 -Destination $restoredRepo -Recurse;[void](Git $restoredRepo @('reset','--hard',$metadata.baseline_sha));foreach($entry in @($metadata.untracked)){$target=Join-Path $restoredRepo $entry.path;[void][IO.Directory]::CreateDirectory((Split-Path $target -Parent));[IO.File]::WriteAllBytes($target,[IO.File]::ReadAllBytes((Join-Path $resolved "runtime-ready/$($entry.artifact)")));Assert ((Get-FileHash $target -Algorithm SHA256).Hash.ToLowerInvariant()-ceq$entry.sha256) 'untracked restore digest'}
+ $patchPath=Join-Path $resolved 'runtime-ready/backend-tracked.patch';if((Get-Item $patchPath).Length){& git.exe -C $restoredRepo apply --binary $patchPath;if($LASTEXITCODE){throw 'tracked patch restore failed'}};$restored=@(Git $restoredRepo @('status','--porcelain=v1','--untracked-files=all'));Assert ($restored-match'allowed.txt') 'restored change missing';WriteText (Join-Path $resolved 'restoration-verification.json') (@{result='PASS';agent='backend';changed_state=$restored}|ConvertTo-Json)
+ $schemaResults=[Collections.Generic.List[object]]::new();foreach($id in @('backend','flutter','test_review')){foreach($kind in @('runtime-ready','runtime-blocked')){$path=Join-Path $resolved "$kind/$id-status.json";if(Test-Path $path){$valid=(Get-Content -Raw $path|Test-Json -SchemaFile (Join-Path $resolved 'phase3b-agent-status.schema.json'));Assert $valid "$kind $id status schema";$schemaResults.Add(@{path="$kind/$id-status.json";valid=$true})}}};foreach($kind in @('runtime-ready','runtime-blocked')){$path=Join-Path $resolved "$kind/result-manifest.json";$valid=(Get-Content -Raw $path|Test-Json -SchemaFile (Join-Path $resolved 'phase3b-result-manifest.schema.json'));Assert $valid "$kind manifest schema";$schemaResults.Add(@{path="$kind/result-manifest.json";valid=$true})};foreach($id in @('backend','flutter')){$path=Join-Path $resolved "runtime-ready/$id-report.json";$valid=(Get-Content -Raw $path|Test-Json -SchemaFile (Join-Path $resolved 'phase3b-implementation-report.schema.json'));Assert $valid "$id report schema";$schemaResults.Add(@{path="runtime-ready/$id-report.json";valid=$true})};$reviewPath=Join-Path $resolved 'runtime-ready/test_review-report.json';$valid=(Get-Content -Raw $reviewPath|Test-Json -SchemaFile (Join-Path $resolved 'phase3b-write-review-report.schema.json'));Assert $valid 'WRITE review report schema';$schemaResults.Add(@{path='runtime-ready/test_review-report.json';valid=$true});WriteText (Join-Path $resolved 'schema-verification.json') (@($schemaResults)|ConvertTo-Json)
+ $inventoryPath=Join-Path $resolved 'artifact-inventory.json';$inventory=@(Get-ChildItem -LiteralPath $resolved -File -Recurse|Where-Object{-not$_.FullName.Equals($inventoryPath,[StringComparison]::OrdinalIgnoreCase)}|Sort-Object FullName|ForEach-Object{FileRecord $resolved $_});WriteText $inventoryPath ($inventory|ConvertTo-Json -Depth 10);AssertInventory $resolved
 }
-function Write-TestFile([string]$Path, [string]$Text) {
-    $parent = Split-Path $Path -Parent
-    if (-not [IO.Directory]::Exists($parent)) { [void][IO.Directory]::CreateDirectory($parent) }
-    [IO.File]::WriteAllText($Path, $Text, [Text.UTF8Encoding]::new($false))
-}
-
-[void][IO.Directory]::CreateDirectory($temporaryRoot)
-try {
-    . $pipeline -LibraryOnly
-
-    foreach ($powerShellFile in @($pipeline, $PSCommandPath)) {
-        $tokens = $null; $errors = $null
-        [void][Management.Automation.Language.Parser]::ParseFile($powerShellFile, [ref]$tokens, [ref]$errors)
-        Assert-True ($errors.Count -eq 0) "PowerShell syntax error in $powerShellFile`: $($errors | Out-String)"
-    }
-    $passed.Add('PowerShell parser')
-
-    $schemaNames = @(
-        'phase3b-write-task-brief.schema.json', 'phase3b-write-approval.schema.json',
-        'phase3b-implementation-report.schema.json', 'phase3b-write-review-report.schema.json',
-        'phase3b-agent-status.schema.json', 'phase3b-result-manifest.schema.json'
-    )
-    foreach ($name in $schemaNames) {
-        $text = [IO.File]::ReadAllText((Join-Path $schemaRoot $name), [Text.UTF8Encoding]::new($false, $true))
-        $schemaObject = $text | ConvertFrom-Json -Depth 50 -ErrorAction Stop
-        Assert-True ($schemaObject.additionalProperties -eq $false) "$name is not fail-closed"
-    }
-    $passed.Add('JSON schema parsing')
-
-    $sha = '1' * 40
-    $task = [ordered]@{
-        schema_version='1.0'; task_id='fixture'; baseline_sha=$sha; execution_strategy='SEQUENTIAL'; sequential_order=@('backend')
-        agents=@(
-            [ordered]@{agent_id='backend';disposition='RUN';worktree_absolute_path='C:\fixture\backend';git_top_level='C:\fixture\backend';branch='agent/backend';expected_head=$sha;run_mode='WRITE';allowed_files=@('api');forbidden_files=@('api/secret');instructions='edit';test_commands=@();dependencies=@()},
-            [ordered]@{agent_id='flutter';disposition='SKIP';worktree_absolute_path='C:\fixture\flutter';git_top_level='C:\fixture\flutter';branch='agent/flutter';expected_head=$sha;run_mode='WRITE';allowed_files=@();forbidden_files=@();instructions='';test_commands=@();dependencies=@()},
-            [ordered]@{agent_id='test_review';disposition='RUN';worktree_absolute_path='C:\fixture\test';git_top_level='C:\fixture\test';branch='agent/test-review';expected_head=$sha;run_mode='READ_ONLY';allowed_files=@();forbidden_files=@();instructions='review';test_commands=@();dependencies=@()}
-        )
-    }
-    $taskJson = $task | ConvertTo-Json -Depth 30
-    Assert-True ($taskJson | Test-Json -SchemaFile (Join-Path $schemaRoot 'phase3b-write-task-brief.schema.json')) 'Positive Task Brief fixture failed schema validation'
-    $badTask = $taskJson | ConvertFrom-Json -Depth 30; $badTask.agents[0].allowed_files = @('../escape')
-    Assert-True (-not (($badTask | ConvertTo-Json -Depth 30) | Test-Json -SchemaFile (Join-Path $schemaRoot 'phase3b-write-task-brief.schema.json') -ErrorAction SilentlyContinue)) 'Path escape fixture was schema-valid'
-    $badReview = '{"schema_version":"1.0","task_id":"fixture","review_type":"WRITE_RUNTIME","reviewed_agent_ids":["backend"],"reviewed_artifact_sha256":"' + ('a'*64) + '","acceptance_criteria_results":[{"criterion":"1","result":"PASS"}],"findings":[{"severity":"MAJOR","location":"x","reproduction_condition":"x","expected_result":"x"}],"unverified_items":[],"review_verdict":"APPROVE","final_result":"READY_FOR_PHASE3C"}'
-    Assert-True (-not ($badReview | Test-Json -SchemaFile (Join-Path $schemaRoot 'phase3b-write-review-report.schema.json') -ErrorAction SilentlyContinue)) 'MAJOR finding allowed READY'
-    $passed.Add('Schema positive and negative fixtures')
-
-    Assert-Throws { Assert-F3BRelativePath '..\escape' } 'INVALID_RELATIVE_PATH' 'parent path escape'
-    Assert-Throws { Assert-F3BRelativePath 'C:\absolute' } 'INVALID_RELATIVE_PATH' 'absolute path'
-    Assert-Throws { Assert-F3BRelativePath 'api/file.txt:stream' } 'INVALID_RELATIVE_PATH' 'ADS path'
-    Assert-Throws { Assert-F3BRelativePath 'api/*.py' } 'INVALID_RELATIVE_PATH' 'glob path'
-    Assert-True (Test-F3BPathPolicy 'api/good.py' @('api') @('api/secret')) 'Allowed path rejected'
-    Assert-True (-not (Test-F3BPathPolicy 'api/secret/key.txt' @('api') @('api/secret'))) 'Forbidden path did not override allowed path'
-    $passed.Add('Path policy')
-
-    $collision = $taskJson | ConvertFrom-Json -Depth 30
-    $collision.agents[1].disposition='RUN'; $collision.agents[1].allowed_files=@('API/models'); $collision.agents[1].instructions='edit'; $collision.sequential_order=@('backend','flutter'); $collision.agents[1].worktree_absolute_path=$collision.agents[0].worktree_absolute_path
-    Assert-Throws { Assert-F3BPlan $collision } 'ALLOWED_PATH_COLLISION|PARALLEL|WRITE_AGENT' 'allowed path containment collision'
-
-    $repo = Join-Path $temporaryRoot 'repo'
-    [void][IO.Directory]::CreateDirectory($repo)
-    [void](Invoke-TestGit $repo @('init','--initial-branch=agent/backend'))
-    [void](Invoke-TestGit $repo @('config','user.name','Phase3B Fixture'))
-    [void](Invoke-TestGit $repo @('config','user.email','fixture@example.invalid'))
-    Write-TestFile (Join-Path $repo 'allowed/base.txt') 'base'
-    Write-TestFile (Join-Path $repo 'rename-me.txt') 'rename'
-    [void](Invoke-TestGit $repo @('add','allowed/base.txt','rename-me.txt'))
-    [void](Invoke-TestGit $repo @('commit','-m','fixture'))
-    $head = Invoke-TestGit $repo @('rev-parse','HEAD')
-    $agent = [pscustomobject]@{agent_id='backend';worktree_absolute_path=$repo;git_top_level=$repo;branch='agent/backend';expected_head=$head;allowed_files=@('allowed','rename-me.txt');forbidden_files=@('allowed/forbidden')}
-    [void](Get-F3BGitState $agent -RequireClean)
-    Write-TestFile (Join-Path $repo 'allowed/untracked.txt') 'new'
-    Write-TestFile (Join-Path $repo 'allowed/base.txt') 'changed'
-    $changes = @(Get-F3BChangedFiles $agent)
-    Assert-True ('allowed/untracked.txt' -cin $changes -and 'allowed/base.txt' -cin $changes) "Tracked or untracked change was not detected. Actual: $($changes -join ', ')"
-    $passed.Add('tracked and untracked detection')
-    [IO.File]::Delete((Join-Path $repo 'allowed/base.txt'))
-    $changes = @(Get-F3BChangedFiles $agent)
-    Assert-True ('allowed/base.txt' -cin $changes) 'Delete was not detected'
-    $passed.Add('delete detection')
-    [void](Invoke-TestGit $repo @('restore','allowed/base.txt'))
-    [IO.File]::Move((Join-Path $repo 'rename-me.txt'), (Join-Path $repo 'allowed/renamed.txt'))
-    $changes = @(Get-F3BChangedFiles $agent)
-    Assert-True ('rename-me.txt' -cin $changes -and 'allowed/renamed.txt' -cin $changes) 'Rename endpoints were not detected'
-    $passed.Add('rename detection')
-    Write-TestFile (Join-Path $repo 'outside.txt') 'bad'
-    Assert-Throws { [void](Get-F3BChangedFiles $agent) } 'CHANGE_OUTSIDE_ALLOWLIST' 'outside allowlist change'
-    [void](Invoke-TestGit $repo @('add','allowed/renamed.txt'))
-    Assert-Throws { [void](Get-F3BChangedFiles $agent) } 'STAGED_CHANGE' 'staged change'
-    Assert-Throws { [void](Get-F3BGitState $agent -RequireClean) } 'DIRTY_WORKTREE' 'dirty worktree'
-
-    [void](Invoke-TestGit $repo @('restore','--staged','allowed/renamed.txt'))
-    [IO.File]::Delete((Join-Path $repo 'outside.txt'))
-    $measured=@(Get-F3BChangedFiles $agent)
-    $state=Get-F3BGitState $agent
-    $goodReport=[pscustomobject]@{task_id='fixture';agent_id='backend';status='SUCCESS';observed_worktree=$repo;observed_branch='agent/backend';observed_head=$head;claimed_changed_files=$measured}
-    Assert-F3BImplementationReport $goodReport $agent 'fixture' $measured $state $state
-    $passed.Add('implementation report and Git agreement')
-    $blocked=$goodReport.PSObject.Copy();$blocked.status='BLOCKED'
-    Assert-Throws { Assert-F3BImplementationReport $blocked $agent 'fixture' $measured $state $state } 'REPORT_IDENTITY_OR_STATUS_MISMATCH' 'implementation BLOCKED rejection'
-    $missing=$goodReport.PSObject.Copy();$missing.claimed_changed_files=@()
-    Assert-Throws { Assert-F3BImplementationReport $missing $agent 'fixture' $measured $state $state } 'REPORT_FILE_SET_MISMATCH' 'implementation file mismatch'
-
-    $bundleDir=Join-Path $temporaryRoot 'bundle';[void][IO.Directory]::CreateDirectory($bundleDir)
-    $bundle=New-F3BChangeBundle $agent $measured $bundleDir
-    Assert-True ([IO.File]::Exists((Join-Path $bundleDir 'backend-tracked.patch'))) 'Tracked binary patch missing'
-    Assert-True (@($bundle.metadata.untracked).Count -gt 0) 'Untracked content metadata missing'
-    foreach($entry in @($bundle.metadata.untracked)){Assert-True ((Get-F3BFileSha256 (Join-Path $bundleDir $entry.artifact)) -ceq $entry.sha256) 'Untracked content digest mismatch'}
-    $passed.Add('restorable patch and content-addressed untracked bytes')
-
-    $statusBrief=[pscustomobject]@{task_id='fixture'};$statusAgent=[pscustomobject]@{agent_id='backend';disposition='RUN'}
-    $status=New-F3BAgentStatus $statusBrief $statusAgent;Write-F3BAgentStatus $bundleDir $status
-    Assert-True ((Read-F3BUtf8 (Join-Path $bundleDir 'backend-status.json')) | Test-Json -SchemaFile (Join-Path $schemaRoot 'phase3b-agent-status.schema.json')) 'Agent status producer output invalid'
-    $passed.Add('agent status producer and schema')
-
-    $briefPath = Join-Path $temporaryRoot 'brief.json'; Write-TestFile $briefPath $taskJson
-    $digest = Get-F3BFileSha256 $briefPath
-    $approvalPath = Join-Path $temporaryRoot 'approval.json'
-    Write-TestFile $approvalPath (([ordered]@{schema_version='1.0';task_id='fixture';verdict='APPROVE';task_brief_sha256=$digest} | ConvertTo-Json -Compress))
-    $approval = Read-F3BSchemaJson $approvalPath 'phase3b-write-approval.schema.json'
-    Assert-True ($approval.task_brief_sha256 -ceq $digest) 'Valid digest was rejected'
-    Write-TestFile $briefPath ($taskJson + ' ')
-    Assert-True ((Get-F3BFileSha256 $briefPath) -cne $approval.task_brief_sha256) 'Raw-byte digest mismatch was not observable'
-    $passed.Add('raw-byte approval digest')
-
-    $stub = Join-Path $temporaryRoot 'stub.ps1'
-    Write-TestFile $stub "param([int]`$Code=0,[int]`$Delay=0); if(`$Delay){Start-Sleep -Seconds `$Delay}; exit `$Code"
-    $ok = Invoke-F3BProcess pwsh @('-NoProfile','-NonInteractive','-File',$stub,'-Code','0') $temporaryRoot 10
-    Assert-True ($ok.ExitCode -eq 0) 'Fake process success failed'
-    $failed = Invoke-F3BProcess pwsh @('-NoProfile','-NonInteractive','-File',$stub,'-Code','7') $temporaryRoot 10
-    Assert-True ($failed.ExitCode -eq 7) 'Fake process failure was not collected'
-    Assert-Throws { [void](Invoke-F3BProcess pwsh @('-NoProfile','-NonInteractive','-File',$stub,'-Delay','2') $temporaryRoot 1) } 'PROCESS_TIMEOUT' 'fake worker timeout'
-    Assert-True ($failed.ExitCode -ne 0 -and $ok.ExitCode -eq 0) 'Parallel partial failure evidence was not retained'
-    $passed.Add('fake-only worker failure and parallel collection')
-
-    $pipelineText = [IO.File]::ReadAllText($pipeline)
-    Assert-True ($pipelineText -notmatch 'Invoke-Expression|ScriptBlock[.]Create|pwsh\s+-Command') 'Dynamic command construction found'
-    Assert-True ($pipelineText -notmatch 'Invoke-FairiesReadOnlyPipeline|phase3a-') 'Phase 3A coupling found'
-    Assert-True ($pipelineText -match 'TASK_BRIEF_OR_APPROVAL_CHANGED') 'Per-Agent digest gate missing'
-    Assert-True ($pipelineText -match 'TEST_WORKING_DIRECTORY_ESCAPE') 'Test working-directory physical gate missing'
-    Assert-True ($pipelineText -match 'final_result=.BLOCKED') 'BLOCKED manifest producer missing'
-    $passed.Add('No eval and Phase 3A isolation')
-
-    "Phase 3B dedicated harness passed $($passed.Count) checks:"
-    $passed | ForEach-Object { "PASS: $_" }
-}
-finally {
-    if ([IO.Directory]::Exists($temporaryRoot)) {
-        $resolved = [IO.Path]::GetFullPath($temporaryRoot)
-        $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
-        if (-not $resolved.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase) -or -not ([IO.Path]::GetFileName($resolved).StartsWith('fairies-phase3b-test-', [StringComparison]::Ordinal))) { throw "Unsafe fixture cleanup target: $resolved" }
-        Remove-Item -LiteralPath $resolved -Recurse -Force
-    }
-}
+function InvokeScenario($Brief,[string]$Name,[string]$Behavior='success',[int]$Timeout=10,[switch]$ExpectFailure){foreach($repo in @($r1,$r2)){if($repo){$fixtureChange=Join-Path $repo 'allowed.txt';if(Test-Path -LiteralPath $fixtureChange){Remove-Item -LiteralPath $fixtureChange -Force}}};$paths=SaveInputs $Brief $Name;$runs=Join-Path $temporaryRoot "runs-$Name";$env:F3B_FIXTURE_BEHAVIOR=$Behavior;$env:F3B_FIXTURE_MARKERS=Join-Path $temporaryRoot "markers-$Name";[void][IO.Directory]::CreateDirectory($env:F3B_FIXTURE_MARKERS);$failed=$false;try{& $pipeline -TaskBriefPath $paths[0] -ApprovalPath $paths[1] -RunsRoot $runs -CodexExecutable pwsh -CodexPrefixArgument @('-NoProfile','-NonInteractive','-File',(Join-Path $temporaryRoot 'codex-stub.ps1')) -AgentTimeoutSeconds $Timeout|Out-Null}catch{$failed=$true;if(-not$ExpectFailure){throw}};Assert ($failed-eq[bool]$ExpectFailure) "$Name expected failure mismatch";LatestRun $runs}
+try{
+ [void][IO.Directory]::CreateDirectory($temporaryRoot)
+ $tokens=$null;$errors=$null;[void][Management.Automation.Language.Parser]::ParseFile($pipeline,[ref]$tokens,[ref]$errors);Assert ($errors.Count-eq0) 'runtime parser errors'
+ foreach($schema in Get-ChildItem $schemaRoot 'phase3b-*.schema.json'){Get-Content -Raw $schema.FullName|ConvertFrom-Json -Depth 40|Out-Null};$passed.Add('PowerShell and JSON parse')
+ . $pipeline -LibraryOnly
+ foreach($bad in @('..\x','C:\x','a:b','*.txt','.')){try{Assert-F3BRelativePath $bad;throw 'accepted'}catch{Assert ($_.Exception.Message-notmatch'accepted') "unsafe path $bad"}};$passed.Add('relative path, ADS, glob, absolute and dot rejection')
+ $r1=NewRepo backend 'agent/backend';$r2=NewRepo flutter 'agent/flutter';$rr=NewRepo review 'agent/test-review'
+ $testScript=Join-Path $temporaryRoot 'test-ok.ps1';WriteText $testScript "exit 0";$test=@(@{command_id='fixed';executable='pwsh';argv=@('-NoProfile','-NonInteractive','-File',$testScript);working_directory=$r1;timeout_seconds=10;network=$false;external_service=$false;device=$false})
+ $stub=@'
+param([Parameter(ValueFromRemainingArguments=$true)][string[]]$Rest)
+$inputText=[Console]::In.ReadToEnd();$p=$inputText|ConvertFrom-Json -Depth 50
+[IO.File]::WriteAllText((Join-Path $env:F3B_FIXTURE_MARKERS ("$($p.agent_id)-start")),[DateTime]::UtcNow.ToString('o'))
+if($p.role-eq'IMPLEMENTATION'){Start-Sleep -Milliseconds 700}
+if($p.role-eq'IMPLEMENTATION'-and$p.agent_id-eq'backend'-and$env:F3B_FIXTURE_BEHAVIOR-notin @('partial_fail','timeout','sequential_fail')){[IO.File]::WriteAllBytes((Join-Path $p.worktree 'allowed.txt'),[byte[]](0,1,2,10,13,255))}
+if($env:F3B_FIXTURE_BEHAVIOR-eq'timeout'-and$p.agent_id-eq'backend'){Start-Sleep 3}
+if($env:F3B_FIXTURE_BEHAVIOR-eq'partial_fail'-and$p.agent_id-eq'backend'){exit 7}
+if($env:F3B_FIXTURE_BEHAVIOR-eq'sequential_fail'-and$p.agent_id-eq'backend'){exit 8}
+if($p.role-eq'IMPLEMENTATION'){$claims=@($p.test_commands|ForEach-Object{@{command_id=$_.command_id;exit_code=0;timed_out=$false}});$changed=@();if($p.agent_id-eq'backend'-and$env:F3B_FIXTURE_BEHAVIOR-notin @('partial_fail','timeout','sequential_fail')){$changed=@('allowed.txt')};$report=@{schema_version='1.0';task_id=$p.task_id;agent_id=$p.agent_id;status=$(if($env:F3B_FIXTURE_BEHAVIOR-eq'blocked_report'){'BLOCKED'}else{'SUCCESS'});observed_worktree=$p.worktree;observed_git_top_level=$p.git_top_level;observed_branch=$p.branch;pre_head=$p.pre_head;post_head=$p.pre_head;summary='fixture';claimed_changed_files=$changed;staged_files=@();test_claims=$claims;unverified_items=@()}}
+else{$findings=[object[]]@();if($env:F3B_FIXTURE_BEHAVIOR-eq'review_reject'){$findings=[object[]]@(@{severity='MAJOR';location='fixture';reproduction_condition='fixture';expected_result='pass'})};$report=@{schema_version='1.0';task_id=$p.task_id;reviewer_agent_id='test_review';review_type='WRITE_RUNTIME';reviewed_agent_ids=[string[]]@('backend','flutter');reviewed_artifact_sha256=$p.fixed_delivery.change_bundle.sha256;reviewed_schema_sha256=$p.fixed_delivery.schemas;acceptance_criteria_results=[object[]]@(@{criterion='runtime';result=$(if($env:F3B_FIXTURE_BEHAVIOR-eq'review_reject'){'FAIL'}else{'PASS'})});findings=$findings;unverified_items=[string[]]@();review_verdict=$(if($env:F3B_FIXTURE_BEHAVIOR-eq'review_reject'){'REQUEST_CHANGES'}else{'APPROVE'});final_result=$(if($env:F3B_FIXTURE_BEHAVIOR-eq'review_reject'){'BLOCKED'}else{'READY_FOR_PHASE3C'})}}
+$outIndex=[Array]::IndexOf($Rest,'--output-last-message');$out=$Rest[$outIndex+1];[IO.File]::WriteAllText($out,($report|ConvertTo-Json -Depth 50),[Text.UTF8Encoding]::new($false));[IO.File]::WriteAllText((Join-Path $env:F3B_FIXTURE_MARKERS ("$($p.agent_id)-end")),[DateTime]::UtcNow.ToString('o'));exit 0
+'@;WriteText (Join-Path $temporaryRoot 'codex-stub.ps1') $stub
+ $parallel=@{schema_version='1.0';task_id='parallel';baseline_sha=(Git $r1 @('rev-parse','HEAD'));execution_strategy='PARALLEL';sequential_order=@();agents=@((Agent backend $r1 'WRITE' 'RUN' @() $test),(Agent flutter $r2),(Agent test_review $rr 'READ_ONLY'))}
+ $run=InvokeScenario $parallel 'success';$manifest=Get-Content -Raw (Join-Path $run.FullName 'result-manifest.json')|ConvertFrom-Json;Assert ($manifest.final_result-ceq'READY_FOR_PHASE3C') 'READY manifest';foreach($s in Get-ChildItem (Join-Path $run.FullName 'schemas') '*.json'){Get-Content -Raw $s.FullName|ConvertFrom-Json -Depth 40|Out-Null};foreach($id in @('backend','flutter','test_review')){Assert ((Get-Content -Raw (Join-Path $run.FullName "$id-status.json"))|Test-Json -SchemaFile (Join-Path $run.FullName 'schemas/phase3b-agent-status.schema.json')) "$id status invalid"};Assert (Test-Path (Join-Path $run.FullName 'artifact-inventory.json')) 'inventory missing';Assert (Test-Path (Join-Path $run.FullName 'backend-tracked.patch')) 'patch missing';$passed.Add('runtime success, artifact delivery, schemas, READY manifest')
+ $bs=[datetime](Get-Content (Join-Path $env:F3B_FIXTURE_MARKERS 'backend-start'));$fs=[datetime](Get-Content (Join-Path $env:F3B_FIXTURE_MARKERS 'flutter-start'));$be=[datetime](Get-Content (Join-Path $env:F3B_FIXTURE_MARKERS 'backend-end'));$fe=[datetime](Get-Content (Join-Path $env:F3B_FIXTURE_MARKERS 'flutter-end'));Assert (($fs-lt$be)-and($bs-lt$fe)) 'workers did not overlap';$passed.Add('true parallel start before collection')
+ $representativeBlocked=$null;foreach($case in @('partial_fail','timeout','blocked_report','review_reject')){$timeout=if($case-eq'timeout'){1}else{10};$bad=InvokeScenario $parallel $case $case $timeout -ExpectFailure;if($case-eq'blocked_report'){$representativeBlocked=$bad};$m=Get-Content -Raw (Join-Path $bad.FullName 'result-manifest.json')|ConvertFrom-Json;Assert ($m.final_result-ceq'BLOCKED') "$case blocked manifest";Assert ((Get-Content -Raw (Join-Path $bad.FullName 'result-manifest.json'))|Test-Json -SchemaFile (Join-Path $bad.FullName 'schemas/phase3b-result-manifest.schema.json')) "$case manifest schema"};$passed.Add('partial failure collection, timeout, report mismatch and review rejection')
+ $sequential=$parallel.Clone();$sequential.task_id='sequential';$sequential.execution_strategy='SEQUENTIAL';$sequential.sequential_order=@('backend','flutter');$sequential.agents[1].dependencies=@('backend');$bad=InvokeScenario $sequential 'sequential' 'sequential_fail' 10 -ExpectFailure;Assert (-not(Test-Path (Join-Path $env:F3B_FIXTURE_MARKERS 'flutter-start'))) 'sequential successor started';$passed.Add('sequential fail-stop marker')
+ $cycle=$sequential|ConvertTo-Json -Depth 30|ConvertFrom-Json -Depth 30;$cycle.agents[0].dependencies=@('flutter');try{Assert-F3BPlan $cycle;throw 'accepted'}catch{Assert ($_.Exception.Message-notmatch'accepted') 'dependency cycle accepted'};$skip=$parallel|ConvertTo-Json -Depth 30|ConvertFrom-Json -Depth 30;$skip.agents[1].disposition='SKIP';$skip.agents[1].allowed_files=@();$skip.agents[0].dependencies=@('flutter');try{Assert-F3BPlan $skip;throw 'accepted'}catch{Assert ($_.Exception.Message-notmatch'accepted') 'SKIP dependency accepted'};$passed.Add('dependency cycle and SKIP dependency rejection')
+ $paths=SaveInputs $parallel 'digest';WriteText $paths[0] ((Get-Content -Raw $paths[0])+' ');try{Assert-F3BInputGate $paths[0] $paths[1] ('a'*64) parallel;throw 'accepted'}catch{Assert ($_.Exception.Message-notmatch'accepted') 'digest mutation accepted'};$passed.Add('per-start digest and approval gate')
+ if($IsWindows){$outside=Join-Path $temporaryRoot outside;[void][IO.Directory]::CreateDirectory($outside);$link=Join-Path $r1 link;cmd /c mklink /J $link $outside|Out-Null;try{Get-F3BPhysicalPath (Join-Path $link 'x')|Out-Null;Assert (-not(Test-F3BInside (Get-F3BPhysicalPath $link) (Get-F3BPhysicalPath $r1))) 'junction escape invisible'}finally{[IO.Directory]::Delete($link)}};$passed.Add('physical junction boundary')
+ PersistReviewArtifacts $run $representativeBlocked
+ "Phase 3B runtime harness passed $($passed.Count) groups";$passed|ForEach-Object{"PASS: $_"}
+}finally{Remove-Item Env:F3B_FIXTURE_BEHAVIOR,Env:F3B_FIXTURE_MARKERS -ErrorAction SilentlyContinue;if([IO.Directory]::Exists($temporaryRoot)){$full=[IO.Path]::GetFullPath($temporaryRoot);$base=[IO.Path]::GetFullPath([IO.Path]::GetTempPath());if(-not$full.StartsWith($base,[StringComparison]::OrdinalIgnoreCase)-or-not[IO.Path]::GetFileName($full).StartsWith('fairies-phase3b-test-',[StringComparison]::Ordinal)){throw 'unsafe cleanup'};Remove-Item -LiteralPath $full -Recurse -Force}}

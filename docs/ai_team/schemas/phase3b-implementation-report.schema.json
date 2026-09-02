@@ -3,17 +3,22 @@
   "$id": "phase3b-implementation-report.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "task_id", "agent_id", "status", "observed_worktree", "observed_branch", "observed_head", "summary", "claimed_changed_files", "unverified_items"],
+  "required": ["schema_version", "task_id", "agent_id", "status", "observed_worktree", "observed_git_top_level", "observed_branch", "pre_head", "post_head", "claimed_changed_files", "staged_files", "test_claims", "summary", "unverified_items"],
   "properties": {
     "schema_version": { "const": "1.0" },
     "task_id": { "type": "string", "minLength": 1 },
     "agent_id": { "enum": ["backend", "flutter"] },
     "status": { "enum": ["SUCCESS", "BLOCKED"] },
     "observed_worktree": { "type": "string", "minLength": 1 },
+    "observed_git_top_level": { "type": "string", "minLength": 1 },
     "observed_branch": { "type": "string", "minLength": 1 },
-    "observed_head": { "type": "string", "pattern": "^(?!0{40}$)[0-9a-fA-F]{40}$" },
+    "pre_head": { "type": "string", "pattern": "^(?!0{40}$)[0-9a-fA-F]{40}$" },
+    "post_head": { "type": "string", "pattern": "^(?!0{40}$)[0-9a-fA-F]{40}$" },
     "summary": { "type": "string", "minLength": 1 },
     "claimed_changed_files": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "staged_files": { "type": "array", "maxItems": 0 },
+    "test_claims": { "type": "array", "items": { "$ref": "#/$defs/test_claim" } },
     "unverified_items": { "type": "array", "items": { "type": "string", "minLength": 1 } }
-  }
+  },
+  "$defs": { "test_claim": { "type": "object", "additionalProperties": false, "required": ["command_id", "exit_code", "timed_out"], "properties": { "command_id": { "type": "string", "minLength": 1 }, "exit_code": { "type": "integer" }, "timed_out": { "const": false } } } }
 }
