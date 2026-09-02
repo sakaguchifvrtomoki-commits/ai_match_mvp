@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase3b-agent-status.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "agent_id", "planned_action", "started", "completed", "exit_code", "validation_stage", "success", "reason_code", "error_summary", "preflight", "postflight"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "agent_id": { "enum": ["backend", "flutter", "test_review"] },
+    "planned_action": { "enum": ["RUN", "SKIP"] },
+    "started": { "type": "boolean" },
+    "completed": { "type": "boolean" },
+    "exit_code": { "type": ["integer", "null"] },
+    "validation_stage": { "type": "string", "minLength": 1 },
+    "success": { "type": "boolean" },
+    "reason_code": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
+    "error_summary": { "type": "string" },
+    "report_path": { "type": "string", "minLength": 1 },
+    "preflight": { "type": ["object", "null"] },
+    "postflight": { "type": ["object", "null"] }
+  }
+}

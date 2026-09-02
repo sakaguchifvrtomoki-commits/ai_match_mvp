@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase3b-implementation-report.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "task_id", "agent_id", "status", "observed_worktree", "observed_branch", "observed_head", "summary", "claimed_changed_files", "unverified_items"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "agent_id": { "enum": ["backend", "flutter"] },
+    "status": { "enum": ["SUCCESS", "BLOCKED"] },
+    "observed_worktree": { "type": "string", "minLength": 1 },
+    "observed_branch": { "type": "string", "minLength": 1 },
+    "observed_head": { "type": "string", "pattern": "^(?!0{40}$)[0-9a-fA-F]{40}$" },
+    "summary": { "type": "string", "minLength": 1 },
+    "claimed_changed_files": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "unverified_items": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}

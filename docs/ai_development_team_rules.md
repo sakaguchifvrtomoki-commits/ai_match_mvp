@@ -35,6 +35,20 @@ Phase 2では既存の4 Agent体制を維持し、その前段に `agent/orchest
 - 実Google Driveテストなど外部データを書き換えるテストは、人間の明示許可なしに実行しない。
 - token、credential、秘密鍵などの秘密情報をcommitしない。
 
+## Phase 3B WRITE Runtimeの限定例外
+
+人間がraw-byte SHA-256で承認し、独立Test/ReviewがAPPROVEしたPhase 3B
+Runtime Task Briefに限り、Backend／Flutter AgentへTask Brief記載の一時的所有権を
+付与できる。Runtimeはworktree、branch、HEAD、clean state、physical path、approval
+digestを各Agent起動直前にfail-closedで検証し、Allowed Files外を変更してはならない。
+
+WRITE Agentは実装と指定testまでを担当し、stage／commit／mergeは行わない。変更は
+binary-safe patch、content-addressed untracked bytes、Git/test evidence、検証済みreport
+としてrepository外の安全なartifact directoryへ固定し、READ ONLY Test/Reviewへ配送する。
+Test/ReviewのAPPROVEと`READY_FOR_PHASE3C`が揃うまで統合を開始しない。通常のPhase 1/2
+commit handoff、担当範囲および禁止操作はこの将来Runtime例外によって変更されず、
+既存作業を遡及的に正当化しない。
+
 ## テストコマンド
 
 Pythonテストは各worktreeのルートで、共有仮想環境を使って実行する。

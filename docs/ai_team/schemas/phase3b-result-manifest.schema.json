@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "phase3b-result-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "task_id", "baseline_sha", "task_brief_sha256", "stage", "reason_code", "safe_artifact_directory", "artifact_bundle_sha256", "final_result"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "run_id": { "type": "string", "pattern": "^[0-9]{8}T[0-9]{9}Z-[0-9a-f]{32}$" },
+    "task_id": { "type": "string", "minLength": 1 },
+    "baseline_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "task_brief_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "stage": { "enum": ["PREFLIGHT", "WORKER_EXECUTION", "TEST_EXECUTION", "REVIEW_EXECUTION", "COMPLETE", "BLOCKED"] },
+    "reason_code": { "type": "string", "pattern": "^[A-Z0-9_]+$" },
+    "safe_artifact_directory": { "type": "string", "minLength": 1 },
+    "artifact_bundle_sha256": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+    "final_result": { "enum": ["READY_FOR_PHASE3C", "BLOCKED"] }
+  }
+}
