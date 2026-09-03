@@ -368,10 +368,7 @@ function Invoke-FairiesPhase3BWriteRuntime {
     }
     if ([string]::IsNullOrWhiteSpace($TaskBriefPath) -or [string]::IsNullOrWhiteSpace($ApprovalPath)) { throw 'INPUT_PATH_REQUIRED' }
     $stage='INPUT_VALIDATION';$brief = Read-F3BSchemaJson $TaskBriefPath 'phase3b-write-task-brief.schema.json'
-    $approval = Read-F3BSchemaJson $ApprovalPath 'phase3b-write-approval.schema.json'
     $digest = Get-F3BFileSha256 $TaskBriefPath
-    if ($approval.task_id -cne $brief.task_id -or $approval.verdict -cne 'APPROVE' -or $approval.task_brief_sha256.ToLowerInvariant() -cne $digest) { throw 'APPROVAL_MISMATCH' }
-    Assert-F3BPlan $brief;$stage='PATH_VALIDATION'
     $candidateRoot = Assert-F3BSafeArtifactPath $RunsRoot @($script:KnownWorktrees + @($brief.agents.worktree_absolute_path))
     if (-not [IO.Directory]::Exists($candidateRoot)) { [void][IO.Directory]::CreateDirectory($candidateRoot) }
     $runId = '{0}-{1}' -f [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssfffZ'), [Guid]::NewGuid().ToString('N')
@@ -383,8 +380,11 @@ function Invoke-FairiesPhase3BWriteRuntime {
     [IO.File]::WriteAllBytes((Join-Path $runDirectory 'approval.json'), [IO.File]::ReadAllBytes($ApprovalPath))
     $schemaDigests=[ordered]@{}
     foreach($name in @('phase3b-agent-status.schema.json','phase3b-implementation-report.schema.json','phase3b-result-manifest.schema.json','phase3b-write-approval.schema.json','phase3b-write-review-report.schema.json','phase3b-write-task-brief.schema.json')){$source=Join-Path $script:SchemaRoot $name;$dest=Join-Path $runDirectory "schemas/$name";[void][IO.Directory]::CreateDirectory((Split-Path $dest -Parent));[IO.File]::WriteAllBytes($dest,[IO.File]::ReadAllBytes($source));$schemaDigests[$name]=Get-F3BFileSha256 $dest}
-    $workers = @($brief.agents | Where-Object { $_.agent_id -in @('backend','flutter') -and $_.disposition -ceq 'RUN' })
     foreach($agent in $brief.agents){$statuses[$agent.agent_id]=New-F3BAgentStatus $brief $agent;Write-F3BAgentStatus $runDirectory $statuses[$agent.agent_id]}
+    $approval = Read-F3BSchemaJson $ApprovalPath 'phase3b-write-approval.schema.json'
+    if ($approval.task_id -cne $brief.task_id -or $approval.verdict -cne 'APPROVE' -or $approval.task_brief_sha256.ToLowerInvariant() -cne $digest) { throw 'APPROVAL_MISMATCH' }
+    Assert-F3BPlan $brief;$stage='PATH_VALIDATION'
+    $workers = @($brief.agents | Where-Object { $_.agent_id -in @('backend','flutter') -and $_.disposition -ceq 'RUN' })
     $stage = 'WORKER_START'
     $attempts = [Collections.Generic.List[object]]::new()
     if ($brief.execution_strategy -ceq 'PARALLEL') {
