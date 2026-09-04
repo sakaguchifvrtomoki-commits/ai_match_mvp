@@ -5,6 +5,9 @@ from pathlib import Path
 
 import pytest
 
+from api import chat_service
+from api.storage.local import LocalStorage
+
 spec = importlib.util.spec_from_file_location('app', Path(__file__).resolve().parents[1] / 'app.py')
 mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
@@ -295,3 +298,67 @@ def test_t012_all_legacy_fields_preserved():
     assert migrated['matching_hypothesis']['stable_good_match'] == fixture['matching_hypothesis']['stable_good_match']
     assert migrated['evidence'] == fixture['evidence']
     assert migrated['confidence'] == fixture['confidence']
+
+
+# ===========================================================================
+# T013: FastAPI profile loading reuses the legacy migration and backup path
+# ===========================================================================
+
+def test_t013_fastapi_load_migrates_in_place_after_preserving_original(
+    monkeypatch, tmp_path
+):
+    fixture = _load_fixture(FIXTURE_012)
+    user_id = fixture['user_id']
+    storage = LocalStorage(tmp_path)
+    profile_path = tmp_path / 'user_profiles' / f'{user_id}.json'
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(
+        json.dumps(fixture, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    original_bytes = profile_path.read_bytes()
+    monkeypatch.setattr(chat_service, 'get_storage', lambda: storage)
+
+    migrated = chat_service.load_user_profile(user_id)
+
+    assert migrated['user_id'] == user_id
+    assert migrated['profile_version'] == mod.CURRENT_PROFILE_VERSION
+    assert migrated['profile_update_count'] == fixture['profile_update_count']
+    assert migrated['values'] == fixture['values']
+    assert migrated['summary']['stable'] == fixture['summary']['stable']
+    assert storage.load_profile(user_id) == migrated
+    backups = list(
+        profile_path.parent.glob(f'{user_id}.*.pre_migration.bak')
+    )
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original_bytes
+
+    loaded_again = chat_service.load_user_profile(user_id)
+
+    assert loaded_again == migrated
+    assert len(list(profile_path.parent.glob(f'{user_id}.*.pre_migration.bak'))) == 1
+
+
+def test_t014_fastapi_does_not_replace_legacy_profile_when_backup_fails(
+    monkeypatch, tmp_path
+):
+    fixture = _load_fixture(FIXTURE_013)
+    user_id = fixture['user_id']
+    storage = LocalStorage(tmp_path)
+    profile_path = tmp_path / 'user_profiles' / f'{user_id}.json'
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(
+        json.dumps(fixture, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    original_bytes = profile_path.read_bytes()
+    monkeypatch.setattr(chat_service, 'get_storage', lambda: storage)
+    monkeypatch.setattr(
+        storage,
+        'backup_profile_before_migration',
+        lambda requested_user_id: (_ for _ in ()).throw(RuntimeError('backup failed')),
+    )
+
+    with pytest.raises(RuntimeError, match='backup failed'):
+        chat_service.load_user_profile(user_id)
+
+    assert profile_path.read_bytes() == original_bytes
+    assert json.loads(profile_path.read_text(encoding='utf-8'))['user_id'] == user_id
