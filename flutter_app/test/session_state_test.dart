@@ -547,6 +547,39 @@ void main() {
     expect(storage.savedValues, ['user_persisted']);
   });
 
+  test('explicit historical ID is persisted and sent to session API', () async {
+    SharedPreferences.setMockInitialValues({
+      UserStorage.userIdKey: 'user_previous_test',
+    });
+    late Map<String, dynamic> requestBody;
+    final state = SessionState(
+      userStorage: const SharedPreferencesUserStorage(
+        explicitUserId: 'user_historical_master',
+      ),
+      apiClient: FairiesApiClient(
+        client: MockClient((request) async {
+          requestBody = jsonDecode(request.body) as Map<String, dynamic>;
+          return jsonResponse({
+            'user_id': 'user_historical_master',
+            'session_id': 'session_restored',
+            'message': {'role': 'assistant', 'content': 'おかえりなさい'},
+          }, 201);
+        }),
+      ),
+    );
+
+    await waitForUserIdLoad(state);
+    await state.startSession();
+
+    expect(requestBody['user_id'], 'user_historical_master');
+    expect(state.userId, 'user_historical_master');
+    final preferences = await SharedPreferences.getInstance();
+    expect(
+      preferences.getString(UserStorage.userIdKey),
+      'user_historical_master',
+    );
+  });
+
   test('missing stored ID sends null and saves the response ID', () async {
     late Map<String, dynamic> requestBody;
     final storage = FakeUserStorage();

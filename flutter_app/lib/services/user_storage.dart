@@ -9,11 +9,30 @@ abstract class UserStorage {
 }
 
 class SharedPreferencesUserStorage implements UserStorage {
-  const SharedPreferencesUserStorage();
+  const SharedPreferencesUserStorage({
+    this.explicitUserId = const String.fromEnvironment('FAIRIES_USER_ID'),
+  });
+
+  final String explicitUserId;
+
+  String? get _validExplicitUserId {
+    if (explicitUserId.isEmpty || explicitUserId.length > 64) return null;
+    return RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(explicitUserId)
+        ? explicitUserId
+        : null;
+  }
 
   @override
   Future<String?> loadUserId() async {
     final preferences = await SharedPreferences.getInstance();
+    final override = _validExplicitUserId;
+    if (override != null) {
+      final saved = await preferences.setString(UserStorage.userIdKey, override);
+      if (!saved) {
+        throw const UserStorageException('Failed to save explicit user ID.');
+      }
+      return override;
+    }
     return preferences.getString(UserStorage.userIdKey);
   }
 
