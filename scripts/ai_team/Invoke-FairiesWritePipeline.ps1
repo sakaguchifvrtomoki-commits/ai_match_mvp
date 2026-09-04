@@ -147,7 +147,7 @@ function Assert-F3BPlan($Brief) {
             (Get-F3BFullPath $run[0].worktree_absolute_path).Equals((Get-F3BFullPath $run[1].worktree_absolute_path), [StringComparison]::OrdinalIgnoreCase) -or $run[0].expected_head -cne $run[1].expected_head) { throw 'PARALLEL_PLAN_INVALID' }
         if (@($Brief.sequential_order).Count) { throw 'PARALLEL_ORDER_INVALID' }
     } elseif ($Brief.execution_strategy -ceq 'SEQUENTIAL') {
-        if (@($Brief.sequential_order).Count -ne $run.Count -or ($Brief.sequential_order | Sort-Object -Unique).Count -ne $run.Count) { throw 'SEQUENTIAL_ORDER_INVALID' }
+        if (@($Brief.sequential_order).Count -ne $run.Count -or @($Brief.sequential_order | Sort-Object -Unique).Count -ne $run.Count) { throw 'SEQUENTIAL_ORDER_INVALID' }
         foreach ($id in $Brief.sequential_order) { if ($id -cnotin @($run.agent_id)) { throw 'SEQUENTIAL_ORDER_INVALID' } }
         foreach ($agent in $run) { foreach ($dependency in @($agent.dependencies)) { if ([array]::IndexOf([object[]]@($Brief.sequential_order), $dependency) -ge [array]::IndexOf([object[]]@($Brief.sequential_order), $agent.agent_id)) { throw 'DEPENDENCY_ORDER_INVALID' } } }
     } else { throw 'STRATEGY_INVALID' }
