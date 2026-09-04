@@ -318,9 +318,25 @@ function Assert-F3BInputGate([string]$BriefPath,[string]$ApprovalFile,[string]$E
 }
 
 function New-F3BAgentPrompt($Agent,$Brief,[string]$Role,[string]$RunDirectory,$PreState,$Delivery){
-    [ordered]@{role=$Role;task_id=$Brief.task_id;agent_id=$Agent.agent_id;instructions=$Agent.instructions;report_path=(Join-Path $RunDirectory "$($Agent.agent_id)-report.json");report_schema=$(if($Role-ceq'REVIEW'){'phase3b-write-review-report.schema.json'}else{'phase3b-implementation-report.schema.json'});worktree=$Agent.worktree_absolute_path;git_top_level=$PreState.top_level;branch=$PreState.branch;pre_head=$PreState.head;allowed_files=@($Agent.allowed_files);test_commands=@($Agent.test_commands);fixed_delivery=$Delivery}|ConvertTo-Json -Depth 40 -Compress
+    $schemaName = if($Role-ceq'REVIEW'){'phase3b-write-review-report.schema.json'}else{'phase3b-implementation-report.schema.json'}
+    $schemaText = Read-F3BUtf8 (Join-Path $script:SchemaRoot $schemaName)
+    [ordered]@{
+        role=$Role
+        task_id=$Brief.task_id
+        agent_id=$Agent.agent_id
+        instructions=$Agent.instructions
+        report_schema=$schemaName
+        report_schema_json=$schemaText
+        output_contract='Your FINAL RESPONSE must be exactly one JSON object that validates against report_schema_json. Output JSON only. Do not use Markdown, code fences, prose before or after the JSON, or links. Do not write the report file yourself; the runtime captures your final response and writes it to the report path. Populate every required field. Use status BLOCKED and unverified_items when something cannot be verified.'
+        worktree=$Agent.worktree_absolute_path
+        git_top_level=$PreState.top_level
+        branch=$PreState.branch
+        pre_head=$PreState.head
+        allowed_files=@($Agent.allowed_files)
+        test_commands=@($Agent.test_commands)
+        fixed_delivery=$Delivery
+    }|ConvertTo-Json -Depth 40 -Compress
 }
-
 function Start-F3BAgent($Agent, $Brief, [string]$RunDirectory, [string]$Executable, [string[]]$Prefix, [string]$Role, $Delivery) {
     $preState = Get-F3BGitState $Agent -RequireClean
     $reportPath = Join-Path $RunDirectory "$($Agent.agent_id)-report.json"
