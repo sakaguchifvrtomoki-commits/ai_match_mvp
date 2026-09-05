@@ -254,7 +254,7 @@ class GoogleDriveStorage(Storage):
         if self._find_one(parent=parent, properties=props, mime_type=FOLDER_MIME):
             raise Conflict(f"session already exists: {session_id}")
         folder = self._session_folder(session_id, True); clean = dict(metadata); clean.pop("started_at_compact", None); clean.pop("log_path", None)
-        self._put(parent=folder, name="session.md", data=markdown.encode(), mime_type=MARKDOWN_MIME,
+        self._put(parent=folder, name=f"{session_id}.md", data=markdown.encode(), mime_type=MARKDOWN_MIME,
                   properties={"data_type": "session_markdown", "session_id": session_id})
         self._put(parent=folder, name="metadata.json", data=self._json_bytes(clean, "session metadata"), mime_type=JSON_MIME,
                   properties={"data_type": "session_metadata", "session_id": session_id})
@@ -281,5 +281,5 @@ class GoogleDriveStorage(Storage):
         md = self._find_one(parent=folder, properties=md_props); meta = self._find_one(parent=folder, properties=meta_props)
         if not md or not meta: raise NotFound(f"session files not found: {session_id}")
         existing = self.load_session(session_id).metadata; existing.update(metadata); existing.pop("log_path", None)
-        self._put(parent=folder, name="session.md", data=markdown.encode(), mime_type=MARKDOWN_MIME, properties=md_props, existing=md)
+        self._put(parent=folder, name=f"{session_id}.md", data=markdown.encode(), mime_type=MARKDOWN_MIME, properties=md_props, existing=md)
         self._put(parent=folder, name="metadata.json", data=self._json_bytes(existing, "session metadata"), mime_type=JSON_MIME, properties=meta_props, existing=meta)
