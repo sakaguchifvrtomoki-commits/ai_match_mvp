@@ -1,4 +1,5 @@
 import datetime
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -7,6 +8,7 @@ import app as streamlit_app
 from api.storage import get_storage
 from api.storage.base import StorageError
 
+logger = logging.getLogger(__name__)
 
 API_VERSION = "0.2.2"
 DEFAULT_DISPLAY_NAME = streamlit_app.DEFAULT_DISPLAY_NAME
@@ -146,6 +148,7 @@ def create_initial_session_log(
     try:
         get_storage().create_session(session_id, metadata, "\n".join(lines))
     except StorageError as exc:
+        logger.exception("Failed to create session in storage: session_id=%s", session_id)
         raise SessionStartError("セッション情報を記録できませんでした。") from exc
 
 
