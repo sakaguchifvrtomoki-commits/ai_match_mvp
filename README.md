@@ -29,6 +29,30 @@ AIとの会話を通じてユーザーの性格・価値観・関心を分析し
 - PC向けデバッグ表示
 - エラー時のフォールバック処理
 
+## v0.2.2の主な変更
+
+- 既存のStreamlit版を維持しながら、スマートフォン向けのFlutterフロントエンドと
+  Python/FastAPIバックエンドを分離して追加
+- FastAPIにセッション開始、Fairyとのチャット、人物分析・マッチング、セッション終了のAPIを実装
+- マッチング処理の進行状況を実処理に合わせて通知するNDJSONストリーミングAPIを追加
+- Flutterから各FastAPIへ接続し、会話履歴を端末側で保持したまま、通信失敗後に再試行できる状態管理を実装
+- マッチ結果、上位候補、マッチ後支援、Fairyプロフィール概要、プロフィール更新結果をFlutter画面へ表示
+- `user_id` の端末保存に対応し、読み込み失敗時は新しいセッションを開始せず、再読み込み後に続行する動作を追加
+- Google Driveとローカル保存を同じインターフェースで扱うStorage backendを追加
+- Google DriveでFairyプロフィール、プロフィール履歴、migration前バックアップ、セッションログの作成・読み込み・更新に対応
+- Google Driveのsessionフォルダ、metadata、Markdownを完全な `session_id` で対応付け、
+  session Markdownのファイル名を `<session_id>.md` に統一
+- Google DriveのユーザーOAuth、サービスアカウント、Application Default Credentialsを明示的に選択できる認証設定を追加
+- ユーザーOAuth認証、開発用Driveテストルート作成、StorageおよびFastAPIとの実疎通確認用スクリプトを追加
+- v0.2.1までのプロフィールschemaと段階的migrationを変更せずFastAPIから再利用し、読み込み失敗時に空プロフィールで
+  上書きしない保護、migration前バックアップ、セッション単位のプロフィール更新の冪等性を維持
+- 過去プロフィールのmigration fixtureを環境に依存しない形へ整理し、履歴データの保護と互換性を確認する回帰テストを追加
+- Androidを主要ターゲットとするFlutterプロジェクト、アプリアイコン、共通背景、レスポンシブなチャット・結果画面を追加
+- API接続先を `FAIRIES_API_BASE_URL` のdart-defineで切り替えられるようにし、Androidエミュレータから
+  ローカルFastAPIへ接続する開発設定を追加
+- FastAPIの各API、共通エラー、部分失敗、Storage、Google Drive認証、プロフィールmigrationを対象とするPythonテストと、
+  API client、モデル、画面状態、再試行、Widget表示を対象とするFlutterテストを追加
+
 ## v0.2.1の主な変更
 
 - v0.2.0で発生した重大な不具合（旧バージョンのプロフィールJSON読み込み時に例外が起きると、元ファイルが
