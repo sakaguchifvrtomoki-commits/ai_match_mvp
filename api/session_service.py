@@ -10,7 +10,7 @@ from api.storage.base import StorageError
 
 logger = logging.getLogger(__name__)
 
-API_VERSION = "0.2.2"
+from fairies_version import APP_VERSION as API_VERSION
 DEFAULT_DISPLAY_NAME = streamlit_app.DEFAULT_DISPLAY_NAME
 INITIAL_GREETING_FALLBACK = "今日はどんな話から始めましょうか？"
 

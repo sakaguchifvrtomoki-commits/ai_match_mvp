@@ -12,6 +12,6 @@ def test_root_returns_app_metadata():
     assert response.status_code == 200
     assert response.json() == {
         "app": "Fairies",
-        "version": "0.2.2",
+        "version": "0.3.0",
         "status": "ok",
     }

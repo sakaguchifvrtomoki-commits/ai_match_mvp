@@ -1,3 +1,5 @@
+from fairies_version import APP_VERSION
+
 import datetime
 import json
 import shutil
@@ -11,7 +13,7 @@ class LocalStorage(Storage):
         self.root = Path(root)
 
     def _profile_path(self, user_id): return self.root / "user_profiles" / f"{user_id}.json"
-    def _sessions_dir(self): return self.root / "logs" / "0.2.2" / "sessions"
+    def _sessions_dir(self): return self.root / "logs" / APP_VERSION / "sessions"
 
     def load_profile(self, user_id: str) -> dict:
         path = self._profile_path(user_id)
@@ -51,7 +53,7 @@ class LocalStorage(Storage):
 
     def create_session(self, session_id, metadata, markdown):
         base = self._sessions_dir(); stamp = metadata["started_at_compact"]; short = session_id.rsplit("_", 1)[-1]
-        log = base / f"session_{stamp}_v0.2.2_{short}.md"; meta = log.with_suffix(".json")
+        log = base / f"session_{stamp}_v{APP_VERSION}_{short}.md"; meta = log.with_suffix(".json")
         data = dict(metadata); data.pop("started_at_compact", None); data["log_path"] = str(log)
         try:
             base.mkdir(parents=True, exist_ok=True); log.write_text(markdown, encoding="utf-8")

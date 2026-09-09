@@ -1,3 +1,5 @@
+from fairies_version import APP_VERSION
+
 import datetime
 import app as streamlit_app
 from api.chat_service import validate_chat_identifiers
@@ -21,7 +23,7 @@ def end_session(session_id: str, payload: dict) -> None:
     ended_at = datetime.datetime.now().astimezone().isoformat(timespec="seconds")
     lines = [
         "# AI分身マッチングMVP ログ", "", "## セッション情報",
-        "- app_version: v0.2.2", f"- session_id: {session_id}",
+        f"- app_version: v{APP_VERSION}", f"- session_id: {session_id}",
         f"- user_id: {payload['user_id']}", f"- started_at: {metadata.get('started_at', '')}",
         f"- ended_at: {ended_at}", f"- log_consent: {str(metadata.get('log_consent', '')).lower()}",
         f"- consented_at: {metadata.get('consented_at', '')}", "- session_status: completed",

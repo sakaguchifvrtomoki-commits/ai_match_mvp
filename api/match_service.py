@@ -1,3 +1,5 @@
+from fairies_version import APP_VERSION
+
 import datetime
 import json
 import logging
@@ -224,7 +226,7 @@ def save_session_log(user_id: str, session_id: str, messages: list[dict], analys
                      match: dict, top: list[dict], support: dict | None) -> bool:
     candidate = match["matched_candidate"]
     lines = ["# AI分身マッチングMVP ログ", "", "## セッション情報",
-             "- app_version: v0.2.2", f"- session_id: {session_id}", f"- user_id: {user_id}",
+             f"- app_version: v{APP_VERSION}", f"- session_id: {session_id}", f"- user_id: {user_id}",
              "- session_status: matched", "", "## チャット履歴"]
     lines += [f"[{m['role']}]: {m['content']}" for m in messages]
     lines += ["", "## 分析結果"] + [f"{k}: {v}" for k, v in analysis.items()]

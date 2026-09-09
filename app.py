@@ -24,7 +24,7 @@ from fairy_memory import build_fairy_memory_context, categorize_profile_interest
 
 load_dotenv()
 
-APP_VERSION = "0.2.1"
+from fairies_version import APP_VERSION
 CURRENT_PROFILE_VERSION = "0.2.1"
 
 

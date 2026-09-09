@@ -15,7 +15,7 @@ client = TestClient(app)
 def session_log_dir(monkeypatch, tmp_path):
     fake_app_file = tmp_path / "app.py"
     monkeypatch.setattr(session_service.streamlit_app, "__file__", str(fake_app_file))
-    return tmp_path / "logs" / "0.2.2" / "sessions"
+    return tmp_path / "logs" / "0.3.0" / "sessions"
 
 
 def test_create_session_for_new_user_uses_fallback_and_writes_log(

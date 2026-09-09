@@ -6,7 +6,7 @@ import '../models/match_loading_phase.dart';
 import '../models/match_response.dart';
 import '../state/session_state.dart';
 
-const fairiesAppVersion = 'v0.2.2';
+const fairiesAppVersion = 'v0.3.0';
 const fairiesSurveyUrl =
     'https://docs.google.com/forms/d/e/1FAIpQLSeEl3FGWUk_-B7CtGLBOq1YNeeRNcClNibd-8ikF_Weh6rE9A/viewform';
 

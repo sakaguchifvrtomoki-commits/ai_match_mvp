@@ -1,3 +1,4 @@
+from fairies_version import APP_VERSION
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -38,7 +39,7 @@ from api.session_service import InvalidSessionRequest, SessionStartError, start_
 
 app = FastAPI(
     title="Fairies API",
-    version="0.2.2",
+    version=APP_VERSION,
 )
 
 
@@ -60,7 +61,7 @@ async def request_validation_error_handler(
 def root():
     return {
         "app": "Fairies",
-        "version": "0.2.2",
+        "version": APP_VERSION,
         "status": "ok",
     }
 

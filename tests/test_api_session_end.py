@@ -16,9 +16,9 @@ BODY = {"user_id": "user_test", "messages": [{"role": "user", "content": "終了
 @pytest.fixture
 def session_files(monkeypatch, tmp_path):
     monkeypatch.setattr(session_end_service.streamlit_app, "__file__", str(tmp_path / "app.py"))
-    base = tmp_path / "logs" / "0.2.2" / "sessions"
+    base = tmp_path / "logs" / "0.3.0" / "sessions"
     base.mkdir(parents=True)
-    log = base / "session_20260819_120000_v0.2.2_abcdef.md"
+    log = base / "session_20260819_120000_v0.3.0_abcdef.md"
     meta = log.with_suffix(".json")
     log.write_text("started", encoding="utf-8")
     meta.write_text(json.dumps({"session_id": SESSION_ID, "user_id": "user_test",
