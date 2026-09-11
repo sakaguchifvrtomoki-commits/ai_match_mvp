@@ -1,6 +1,9 @@
+import os
+
 from fairies_version import APP_VERSION
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from api.chat_service import (
@@ -37,9 +40,28 @@ from api.match_service import (
 from api.session_end_service import SessionEndFailed, end_session
 from api.session_service import InvalidSessionRequest, SessionStartError, start_session
 
+def _cors_origins() -> list[str]:
+    """Read comma-separated exact origins at startup; unset means no origins."""
+    origins = [
+        origin.strip()
+        for origin in os.getenv("FAIRIES_CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ]
+    if any("*" in origin for origin in origins):
+        raise ValueError("FAIRIES_CORS_ORIGINS must contain explicit origins, not wildcards")
+    return origins
+
+
 app = FastAPI(
     title="Fairies API",
     version=APP_VERSION,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
 )
 
 
