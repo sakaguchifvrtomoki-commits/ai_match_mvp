@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from api import session_service
 from api.main import app
+from fairies_version import APP_VERSION
 
 
 client = TestClient(app)
@@ -15,7 +16,7 @@ client = TestClient(app)
 def session_log_dir(monkeypatch, tmp_path):
     fake_app_file = tmp_path / "app.py"
     monkeypatch.setattr(session_service.streamlit_app, "__file__", str(fake_app_file))
-    return tmp_path / "logs" / "0.3.0" / "sessions"
+    return tmp_path / "logs" / APP_VERSION / "sessions"
 
 
 def test_create_session_for_new_user_uses_fallback_and_writes_log(

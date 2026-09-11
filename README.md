@@ -6,7 +6,7 @@ AIとの会話を通じてユーザーの性格・価値観・関心を分析し
 
 ## 現在のバージョン
 
-**v0.3.0**
+**v0.3.1**
 
 ## 主な機能
 
@@ -28,6 +28,18 @@ AIとの会話を通じてユーザーの性格・価値観・関心を分析し
 - アンケートへの導線
 - PC向けデバッグ表示
 - エラー時のフォールバック処理
+
+## v0.3.1の主な変更
+
+- Webテスト配布対応として、Flutter Web版をビルド可能にした
+- Web版からRender FastAPIへ接続するためCORS対応を追加
+- CORS許可originを `FAIRIES_CORS_ORIGINS` 環境変数で管理
+- Flutter WebをCloudflareへ公開：<https://fairies-test.sakaguchi-fvr-tomoki.workers.dev>
+- PCブラウザからWeb版FairiesとRender FastAPIの通信を確認
+- iPad Safariで「起動 → セッション開始 → Fairyとの会話 → マッチング → 結果表示 → セッション終了 → profile生成」まで1セッション完走を確認
+- Apple Developer Programを使わず、iPhone/iPadユーザーへURLでテスト配布できる経路を確立
+- Android APK配布方式は従来どおり維持
+- profile schemaは `0.2.1` のまま維持し、migrationとGoogle Drive保存仕様は変更しない
 
 ## v0.2.2の主な変更
 

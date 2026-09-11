@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from api.main import app
+from fairies_version import APP_VERSION
 
 
 client = TestClient(app)
@@ -12,6 +13,6 @@ def test_root_returns_app_metadata():
     assert response.status_code == 200
     assert response.json() == {
         "app": "Fairies",
-        "version": "0.3.0",
+        "version": APP_VERSION,
         "status": "ok",
     }

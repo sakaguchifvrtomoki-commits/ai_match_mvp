@@ -65,7 +65,7 @@ void main() {
 
     expect(find.text('ログ保存への同意確認'), findsOneWidget);
     expect(find.byKey(const Key('fairies-background')), findsOneWidget);
-    expect(find.text('v0.3.0'), findsOneWidget);
+    expect(find.text('v0.3.1'), findsOneWidget);
     expect(find.textContaining('AIとチャットすることで'), findsOneWidget);
     expect(sessionRequests, 0);
 

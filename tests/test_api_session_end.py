@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 
 from api import session_end_service
 from api.main import app
+from fairies_version import APP_VERSION
 
 
 client = TestClient(app)
@@ -16,7 +17,7 @@ BODY = {"user_id": "user_test", "messages": [{"role": "user", "content": "終了
 @pytest.fixture
 def session_files(monkeypatch, tmp_path):
     monkeypatch.setattr(session_end_service.streamlit_app, "__file__", str(tmp_path / "app.py"))
-    base = tmp_path / "logs" / "0.3.0" / "sessions"
+    base = tmp_path / "logs" / APP_VERSION / "sessions"
     base.mkdir(parents=True)
     log = base / "session_20260819_120000_v0.3.0_abcdef.md"
     meta = log.with_suffix(".json")
